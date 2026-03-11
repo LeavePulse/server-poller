@@ -1,11 +1,12 @@
 //! Minecraft server status polling via SLP (Java) and RakNet (Bedrock).
 
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream as StdTcpStream};
+use std::net::{IpAddr, SocketAddr, TcpStream as StdTcpStream};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
+use hickory_resolver::TokioAsyncResolver;
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -61,6 +62,12 @@ struct JavaStatusResponse {
     favicon: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct JavaConnectTarget {
+    connect_host: String,
+    connect_port: u16,
+}
+
 /// Poll a single Minecraft server.
 ///
 /// Uses SLP (TCP) for Java edition and RakNet Unconnected Ping (UDP) for Bedrock.
@@ -78,7 +85,6 @@ pub async fn poll_server(
 
     let (country, country_code) = geo_cache.fetch_geo(http, host, port, edition).await;
 
-    let port = port.unwrap_or(edition.default_port());
     let timeout = Duration::from_secs_f64(settings.collector.status_timeout_seconds);
 
     let fail_payload = || {
@@ -99,7 +105,7 @@ pub async fn poll_server(
             poll_bedrock(
                 server_id,
                 host,
-                port,
+                port.unwrap_or(edition.default_port()),
                 timeout,
                 &collected_at,
                 &country,
@@ -129,37 +135,60 @@ pub async fn poll_server(
 async fn poll_java(
     server_id: &str,
     host: &str,
-    port: u16,
+    port: Option<u16>,
     timeout: Duration,
     collected_at: &str,
     country: &str,
     country_code: &str,
     fail_payload: impl FnOnce() -> Value,
 ) -> PollResult {
-    let socket_addrs =
-        match tokio::time::timeout(timeout, tokio::net::lookup_host((host, port))).await {
-            Ok(Ok(addrs)) => addrs.collect::<Vec<_>>(),
-            Ok(Err(e)) => {
-                debug!("Java status DNS lookup failed for server {server_id} {host}:{port}: {e}");
-                return PollResult {
-                    payload: fail_payload(),
-                    status_ok: false,
-                    favicon: String::new(),
-                };
-            }
-            Err(_) => {
-                debug!("Java status DNS lookup timed out for server {server_id} {host}:{port}");
-                return PollResult {
-                    payload: fail_payload(),
-                    status_ok: false,
-                    favicon: String::new(),
-                };
-            }
-        };
+    let connect_target = resolve_java_connect_target(host, port, timeout).await;
+    let socket_addrs = match tokio::time::timeout(
+        timeout,
+        tokio::net::lookup_host((
+            &connect_target.connect_host[..],
+            connect_target.connect_port,
+        )),
+    )
+    .await
+    {
+        Ok(Ok(addrs)) => addrs.collect::<Vec<_>>(),
+        Ok(Err(e)) => {
+            debug!(
+                "Java status DNS lookup failed for server {server_id} {}:{} (requested {host}:{}) : {e}",
+                connect_target.connect_host,
+                connect_target.connect_port,
+                port.unwrap_or(crate::models::JAVA_DEFAULT_PORT),
+            );
+            return PollResult {
+                payload: fail_payload(),
+                status_ok: false,
+                favicon: String::new(),
+            };
+        }
+        Err(_) => {
+            debug!(
+                "Java status DNS lookup timed out for server {server_id} {}:{} (requested {host}:{})",
+                connect_target.connect_host,
+                connect_target.connect_port,
+                port.unwrap_or(crate::models::JAVA_DEFAULT_PORT),
+            );
+            return PollResult {
+                payload: fail_payload(),
+                status_ok: false,
+                favicon: String::new(),
+            };
+        }
+    };
 
     let handshake_host = host.to_string();
     let ping_result = tokio::task::spawn_blocking(move || {
-        ping_java_status_blocking(socket_addrs, &handshake_host, port, timeout)
+        ping_java_status_blocking(
+            socket_addrs,
+            &handshake_host,
+            connect_target.connect_port,
+            timeout,
+        )
     })
     .await;
 
@@ -200,7 +229,10 @@ async fn poll_java(
             }
         }
         Ok(Err(e)) => {
-            debug!("Java status failed for server {server_id} {host}:{port}: {e}");
+            debug!(
+                "Java status failed for server {server_id} {host}:{}: {e}",
+                port.unwrap_or(crate::models::JAVA_DEFAULT_PORT),
+            );
             PollResult {
                 payload: fail_payload(),
                 status_ok: false,
@@ -208,13 +240,61 @@ async fn poll_java(
             }
         }
         Err(e) => {
-            debug!("Java status worker failed for server {server_id} {host}:{port}: {e}");
+            debug!(
+                "Java status worker failed for server {server_id} {host}:{}: {e}",
+                port.unwrap_or(crate::models::JAVA_DEFAULT_PORT),
+            );
             PollResult {
                 payload: fail_payload(),
                 status_ok: false,
                 favicon: String::new(),
             }
         }
+    }
+}
+
+async fn resolve_java_connect_target(
+    host: &str,
+    port: Option<u16>,
+    timeout: Duration,
+) -> JavaConnectTarget {
+    let fallback = JavaConnectTarget {
+        connect_host: host.to_string(),
+        connect_port: port.unwrap_or(crate::models::JAVA_DEFAULT_PORT),
+    };
+
+    if port.is_some() || host.parse::<IpAddr>().is_ok() {
+        return fallback;
+    }
+
+    let resolver = match TokioAsyncResolver::tokio_from_system_conf() {
+        Ok(resolver) => resolver,
+        Err(error) => {
+            debug!("Failed to initialize SRV resolver for {host}: {error}");
+            return fallback;
+        }
+    };
+
+    let lookup_name = format!("_minecraft._tcp.{host}");
+    let lookup = match tokio::time::timeout(timeout, resolver.srv_lookup(lookup_name)).await {
+        Ok(Ok(lookup)) => lookup,
+        Ok(Err(error)) => {
+            debug!("No SRV override for {host}: {error}");
+            return fallback;
+        }
+        Err(_) => {
+            debug!("SRV lookup timed out for {host}");
+            return fallback;
+        }
+    };
+
+    let Some(record) = lookup.iter().next() else {
+        return fallback;
+    };
+
+    JavaConnectTarget {
+        connect_host: record.target().to_utf8().trim_end_matches('.').to_string(),
+        connect_port: record.port(),
     }
 }
 
@@ -568,7 +648,10 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    use super::{motd_from_description, ping_java_status_blocking, write_varint};
+    use super::{
+        JavaConnectTarget, motd_from_description, ping_java_status_blocking,
+        resolve_java_connect_target, write_varint,
+    };
 
     fn build_latest_response(json_bytes: &[u8]) -> Vec<u8> {
         let mut packet = Vec::new();
@@ -619,5 +702,30 @@ mod tests {
             motd_from_description(response.description.as_ref()),
             "Minecrafter"
         );
+    }
+
+    #[tokio::test]
+    async fn java_connect_target_keeps_explicit_port() {
+        let target = resolve_java_connect_target(
+            "wizard.harmoniya.net",
+            Some(25565),
+            Duration::from_secs(1),
+        )
+        .await;
+        assert_eq!(
+            target,
+            JavaConnectTarget {
+                connect_host: "wizard.harmoniya.net".to_string(),
+                connect_port: 25565,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn java_connect_target_resolves_srv_port() {
+        let target =
+            resolve_java_connect_target("wizard.harmoniya.net", None, Duration::from_secs(5)).await;
+        assert_eq!(target.connect_host, "wizard.harmoniya.net");
+        assert_eq!(target.connect_port, 20007);
     }
 }
