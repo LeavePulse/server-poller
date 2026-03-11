@@ -310,61 +310,21 @@ fn ping_java_status_blocking(
 
     let started = Instant::now();
     let mut last_error = None;
-    let (handshake_request, status_request) = build_java_status_requests(host, port);
 
     for socket_addr in socket_addrs {
-        let elapsed = started.elapsed();
-        let Some(remaining) = timeout.checked_sub(elapsed) else {
-            return Err(last_error.unwrap_or_else(|| "java status timed out".to_string()));
-        };
+        for protocol_version in java_status_protocol_versions() {
+            let elapsed = started.elapsed();
+            let Some(remaining) = timeout.checked_sub(elapsed) else {
+                return Err(last_error.unwrap_or_else(|| "java status timed out".to_string()));
+            };
 
-        match StdTcpStream::connect_timeout(&socket_addr, remaining) {
-            Ok(mut stream) => {
-                if let Err(e) = stream.set_nodelay(true) {
-                    return Err(format!("failed to set tcp nodelay: {e}"));
+            match try_ping_java_status(socket_addr, host, port, remaining, *protocol_version) {
+                Ok(response) => return Ok(response),
+                Err(error) => {
+                    last_error = Some(format!(
+                        "{socket_addr} protocol {protocol_version}: {error}"
+                    ));
                 }
-                if let Err(e) = stream.set_read_timeout(Some(remaining)) {
-                    return Err(format!("failed to set read timeout: {e}"));
-                }
-                if let Err(e) = stream.set_write_timeout(Some(remaining)) {
-                    return Err(format!("failed to set write timeout: {e}"));
-                }
-                if let Err(e) = stream.write_all(&handshake_request) {
-                    return Err(format!("failed to write handshake request: {e}"));
-                }
-                if let Err(e) = stream.flush() {
-                    return Err(format!("failed to flush handshake request: {e}"));
-                }
-                if let Err(e) = stream.write_all(&status_request) {
-                    return Err(format!("failed to write status request: {e}"));
-                }
-                if let Err(e) = stream.flush() {
-                    return Err(format!("failed to flush status request: {e}"));
-                }
-
-                let _packet_length = read_varint(&mut stream)
-                    .map_err(|e| format!("failed to read packet length: {e}"))?;
-                let packet_id = read_varint(&mut stream)
-                    .map_err(|e| format!("failed to read packet id: {e}"))?;
-                if packet_id != 0 {
-                    return Err(format!("unexpected packet id: {packet_id}"));
-                }
-                let response_length = read_varint(&mut stream)
-                    .map_err(|e| format!("failed to read response length: {e}"))?;
-                if response_length < 0 {
-                    return Err("negative response length".to_string());
-                }
-
-                let mut response_buffer = vec![0; response_length as usize];
-                if let Err(e) = stream.read_exact(&mut response_buffer) {
-                    return Err(format!("failed to read response body: {e}"));
-                }
-
-                return serde_json::from_slice(&response_buffer)
-                    .map_err(|e| format!("failed to decode status json: {e}"));
-            }
-            Err(e) => {
-                last_error = Some(format!("{socket_addr}: {e}"));
             }
         }
     }
@@ -372,9 +332,67 @@ fn ping_java_status_blocking(
     Err(last_error.unwrap_or_else(|| "java status connect failed".to_string()))
 }
 
-fn build_java_status_requests(host: &str, port: u16) -> (Vec<u8>, Vec<u8>) {
+fn java_status_protocol_versions() -> &'static [i32] {
+    &[769, 767, 763, 761, 759, 754, 340, 47, -1]
+}
+
+fn try_ping_java_status(
+    socket_addr: SocketAddr,
+    host: &str,
+    port: u16,
+    timeout: Duration,
+    protocol_version: i32,
+) -> Result<JavaStatusResponse, String> {
+    let (handshake_request, status_request) =
+        build_java_status_requests(host, port, protocol_version);
+    let mut stream = StdTcpStream::connect_timeout(&socket_addr, timeout)
+        .map_err(|e| format!("connect failed: {e}"))?;
+    stream
+        .set_nodelay(true)
+        .map_err(|e| format!("failed to set tcp nodelay: {e}"))?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .map_err(|e| format!("failed to set read timeout: {e}"))?;
+    stream
+        .set_write_timeout(Some(timeout))
+        .map_err(|e| format!("failed to set write timeout: {e}"))?;
+    stream
+        .write_all(&handshake_request)
+        .map_err(|e| format!("failed to write handshake request: {e}"))?;
+    stream
+        .flush()
+        .map_err(|e| format!("failed to flush handshake request: {e}"))?;
+    stream
+        .write_all(&status_request)
+        .map_err(|e| format!("failed to write status request: {e}"))?;
+    stream
+        .flush()
+        .map_err(|e| format!("failed to flush status request: {e}"))?;
+
+    let _packet_length =
+        read_varint(&mut stream).map_err(|e| format!("failed to read packet length: {e}"))?;
+    let packet_id =
+        read_varint(&mut stream).map_err(|e| format!("failed to read packet id: {e}"))?;
+    if packet_id != 0 {
+        return Err(format!("unexpected packet id: {packet_id}"));
+    }
+    let response_length =
+        read_varint(&mut stream).map_err(|e| format!("failed to read response length: {e}"))?;
+    if response_length < 0 {
+        return Err("negative response length".to_string());
+    }
+
+    let mut response_buffer = vec![0; response_length as usize];
+    stream
+        .read_exact(&mut response_buffer)
+        .map_err(|e| format!("failed to read response body: {e}"))?;
+    serde_json::from_slice(&response_buffer)
+        .map_err(|e| format!("failed to decode status json: {e}"))
+}
+
+fn build_java_status_requests(host: &str, port: u16, protocol_version: i32) -> (Vec<u8>, Vec<u8>) {
     let mut handshake = vec![0x00];
-    write_varint(&mut handshake, -1);
+    write_varint(&mut handshake, protocol_version);
     write_varint(&mut handshake, host.len() as i32);
     handshake.extend_from_slice(host.as_bytes());
     handshake.extend_from_slice(&port.to_be_bytes());
@@ -658,9 +676,23 @@ mod tests {
     use tokio::net::TcpListener;
 
     use super::{
-        JavaConnectTarget, motd_from_description, ping_java_status_blocking,
-        resolve_java_connect_target, write_varint,
+        JavaConnectTarget, build_java_status_requests, motd_from_description,
+        ping_java_status_blocking, resolve_java_connect_target, write_varint,
     };
+
+    fn read_varint_bytes(data: &[u8], cursor: &mut usize) -> i32 {
+        let mut result = 0i32;
+        let mut shift = 0u32;
+        loop {
+            let byte = data[*cursor];
+            *cursor += 1;
+            result |= ((byte & 0x7f) as i32) << shift;
+            if (byte & 0x80) == 0 {
+                return result;
+            }
+            shift += 7;
+        }
+    }
 
     fn build_latest_response(json_bytes: &[u8]) -> Vec<u8> {
         let mut packet = Vec::new();
@@ -711,6 +743,73 @@ mod tests {
             motd_from_description(response.description.as_ref()),
             "Minecrafter"
         );
+    }
+
+    #[tokio::test]
+    async fn blocking_java_ping_retries_protocol_versions() {
+        let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            for expected_protocol in [769i32, 767i32] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 512];
+                let size = socket.read(&mut request).await.unwrap();
+                let data = &request[..size];
+                let mut cursor = 0usize;
+                let _packet_len = read_varint_bytes(data, &mut cursor);
+                let packet_id = read_varint_bytes(data, &mut cursor);
+                let protocol = read_varint_bytes(data, &mut cursor);
+                assert_eq!(packet_id, 0);
+                assert_eq!(protocol, expected_protocol);
+                if expected_protocol == 769 {
+                    socket.shutdown().await.unwrap();
+                    continue;
+                }
+
+                let response = build_latest_response(
+                    br#"{"version":{"name":"Velocity 1.7.2-1.21.11","protocol":767},"players":{"max":100,"online":17},"description":{"text":"LuxorCraft"}}"#,
+                );
+                socket.write_all(&response).await.unwrap();
+                break;
+            }
+        });
+
+        let response = tokio::task::spawn_blocking(move || {
+            ping_java_status_blocking(
+                vec![addr],
+                "play.luxorcraft.fun",
+                addr.port(),
+                Duration::from_secs(2),
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(response.players.online, 17);
+        assert_eq!(response.players.max, 100);
+        assert_eq!(response.version.name, "Velocity 1.7.2-1.21.11");
+        assert_eq!(
+            motd_from_description(response.description.as_ref()),
+            "LuxorCraft"
+        );
+    }
+
+    #[test]
+    fn build_java_status_requests_writes_protocol_version() {
+        let (handshake, status) = build_java_status_requests("play.luxorcraft.fun", 25565, 767);
+        assert_eq!(status, vec![0x01, 0x00]);
+
+        let mut cursor = 0usize;
+        let _packet_len = read_varint_bytes(&handshake, &mut cursor);
+        let packet_id = read_varint_bytes(&handshake, &mut cursor);
+        let protocol = read_varint_bytes(&handshake, &mut cursor);
+
+        assert_eq!(packet_id, 0);
+        assert_eq!(protocol, 767);
     }
 
     #[tokio::test]
