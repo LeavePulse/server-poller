@@ -158,3 +158,214 @@ pub fn build_change_payload(
 
     Some(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{Edition, ServerState};
+
+    fn make_state() -> ServerState {
+        ServerState {
+            key: "1".to_string(),
+            server_id: "1".to_string(),
+            server: json!({}),
+            host: "mc.example.com".to_string(),
+            port: None,
+            bedrock_port: None,
+            edition: Edition::Java,
+            next_due: 0.0,
+            next_bedrock_probe: None,
+            next_query_attempt: 0.0,
+            plugin_managed: false,
+            last_favicon_hash: None,
+            has_succeeded: false,
+            initial_failures: 0,
+            consecutive_failures: 0,
+            has_emitted_state: false,
+            last_emitted_up: None,
+            last_emitted_online: None,
+            last_emitted_max_players: None,
+            last_emitted_version: None,
+            last_emitted_motd: None,
+            last_emitted_country: None,
+            last_emitted_country_code: None,
+            last_emitted_players_hash: None,
+        }
+    }
+
+    #[test]
+    fn test_first_emission_is_state_full() {
+        let mut state = make_state();
+        let payload = json!({
+            "server_id": "1",
+            "collected_at": "2025-01-01T00:00:00",
+            "online": 10,
+            "max_players": 100,
+            "version": "1.20.4",
+            "motd": "Hello",
+            "country": "US",
+            "country_code": "US",
+            "extra": {},
+        });
+        let result = build_change_payload(&mut state, &payload, true).unwrap();
+        assert_eq!(result["event_type"], "state_full");
+        assert!(state.has_emitted_state);
+        assert_eq!(state.last_emitted_up, Some(true));
+        assert_eq!(state.last_emitted_online, Some(10));
+    }
+
+    #[test]
+    fn test_no_change_returns_none() {
+        let mut state = make_state();
+        let payload = json!({
+            "collected_at": "2025-01-01T00:00:00",
+            "online": 10,
+            "max_players": 100,
+            "version": "1.20.4",
+            "motd": "Hello",
+            "country": "US",
+            "country_code": "US",
+            "extra": {},
+        });
+        // First call → state_full.
+        build_change_payload(&mut state, &payload, true);
+        // Second call with same data → None.
+        let result = build_change_payload(&mut state, &payload, true);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_server_down_event() {
+        let mut state = make_state();
+        let up_payload = json!({
+            "collected_at": "t1",
+            "online": 5,
+            "max_players": 20,
+            "version": "1.20",
+            "motd": "Hi",
+            "country": "",
+            "country_code": "",
+            "extra": {},
+        });
+        build_change_payload(&mut state, &up_payload, true);
+
+        let down_payload = json!({
+            "collected_at": "t2",
+            "online": null,
+            "max_players": null,
+            "version": "",
+            "motd": "",
+            "country": "",
+            "country_code": "",
+        });
+        let result = build_change_payload(&mut state, &down_payload, false).unwrap();
+        assert_eq!(result["event_type"], "server_down");
+        assert_eq!(result["online"], 0);
+        // Should preserve last known metadata.
+        assert_eq!(result["version"], "1.20");
+        assert_eq!(result["motd"], "Hi");
+    }
+
+    #[test]
+    fn test_server_up_event() {
+        let mut state = make_state();
+        // First: state_full while down.
+        let down_payload = json!({
+            "collected_at": "t1",
+            "online": null,
+            "country": "",
+            "country_code": "",
+        });
+        build_change_payload(&mut state, &down_payload, false);
+
+        // Second: server comes back up.
+        let up_payload = json!({
+            "collected_at": "t2",
+            "online": 5,
+            "max_players": 20,
+            "version": "1.20",
+            "motd": "Hi",
+            "country": "",
+            "country_code": "",
+            "extra": {},
+        });
+        let result = build_change_payload(&mut state, &up_payload, true).unwrap();
+        assert_eq!(result["event_type"], "server_up");
+    }
+
+    #[test]
+    fn test_online_changed_event() {
+        let mut state = make_state();
+        let payload1 = json!({
+            "collected_at": "t1",
+            "online": 10,
+            "max_players": 100,
+            "version": "1.20",
+            "motd": "Hi",
+            "country": "",
+            "country_code": "",
+            "extra": {},
+        });
+        build_change_payload(&mut state, &payload1, true);
+
+        let payload2 = json!({
+            "collected_at": "t2",
+            "online": 15,
+            "max_players": 100,
+            "version": "1.20",
+            "motd": "Hi",
+            "country": "",
+            "country_code": "",
+            "extra": {},
+        });
+        let result = build_change_payload(&mut state, &payload2, true).unwrap();
+        assert_eq!(result["event_type"], "online_changed");
+    }
+
+    #[test]
+    fn test_player_change_detected() {
+        let mut state = make_state();
+        let payload1 = json!({
+            "collected_at": "t1",
+            "online": 2,
+            "max_players": 20,
+            "version": "1.20",
+            "motd": "Hi",
+            "country": "",
+            "country_code": "",
+            "extra": {"players": ["Alice", "Bob"]},
+        });
+        build_change_payload(&mut state, &payload1, true);
+
+        let payload2 = json!({
+            "collected_at": "t2",
+            "online": 2,
+            "max_players": 20,
+            "version": "1.20",
+            "motd": "Hi",
+            "country": "",
+            "country_code": "",
+            "extra": {"players": ["Alice", "Charlie"]},
+        });
+        let result = build_change_payload(&mut state, &payload2, true).unwrap();
+        assert_eq!(result["event_type"], "state_updated");
+    }
+
+    #[test]
+    fn test_plugin_managed_adds_compare_probe() {
+        let mut state = make_state();
+        state.plugin_managed = true;
+        let payload = json!({
+            "collected_at": "t1",
+            "online": 5,
+            "max_players": 20,
+            "version": "1.20",
+            "motd": "Hi",
+            "country": "",
+            "country_code": "",
+            "extra": {},
+        });
+        let result = build_change_payload(&mut state, &payload, true).unwrap();
+        assert_eq!(result["extra"]["compare_probe"], true);
+    }
+}

@@ -275,3 +275,143 @@ pub fn build_state(server: Value, now: f64, startup_spread: u64, probe_interval:
         last_emitted_players_hash: None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_address_simple() {
+        let (host, port) = parse_address("mc.example.com");
+        assert_eq!(host, "mc.example.com");
+        assert_eq!(port, None);
+    }
+
+    #[test]
+    fn test_parse_address_with_port() {
+        let (host, port) = parse_address("mc.example.com:25566");
+        assert_eq!(host, "mc.example.com");
+        assert_eq!(port, Some(25566));
+    }
+
+    #[test]
+    fn test_parse_address_ipv6_bracket() {
+        let (host, port) = parse_address("[::1]:25565");
+        assert_eq!(host, "::1");
+        assert_eq!(port, Some(25565));
+    }
+
+    #[test]
+    fn test_parse_address_ipv6_no_port() {
+        let (host, port) = parse_address("[::1]");
+        assert_eq!(host, "::1");
+        assert_eq!(port, None);
+    }
+
+    #[test]
+    fn test_parse_address_raw_ipv6() {
+        // Raw IPv6 without brackets — multiple colons, no port parsing.
+        let (host, port) = parse_address("2001:db8::1");
+        assert_eq!(host, "2001:db8::1");
+        assert_eq!(port, None);
+    }
+
+    #[test]
+    fn test_normalize_edition() {
+        assert_eq!(normalize_edition(None), Edition::Java);
+        assert_eq!(normalize_edition(Some("java")), Edition::Java);
+        assert_eq!(normalize_edition(Some("Java")), Edition::Java);
+        assert_eq!(normalize_edition(Some("bedrock")), Edition::Bedrock);
+        assert_eq!(normalize_edition(Some("Bedrock")), Edition::Bedrock);
+        assert_eq!(normalize_edition(Some("java_bedrock")), Edition::Java);
+    }
+
+    #[test]
+    fn test_is_plugin_managed() {
+        let not_verified = serde_json::json!({"is_verified": false});
+        assert!(!is_plugin_managed(&not_verified));
+
+        let verified_no_source = serde_json::json!({"is_verified": true});
+        assert!(!is_plugin_managed(&verified_no_source));
+
+        let verified_plugin = serde_json::json!({
+            "is_verified": true,
+            "verification_source": "plugin"
+        });
+        assert!(is_plugin_managed(&verified_plugin));
+
+        let verified_other = serde_json::json!({
+            "is_verified": true,
+            "verification_source": "manual"
+        });
+        assert!(!is_plugin_managed(&verified_other));
+    }
+
+    #[test]
+    fn test_is_internal_only_host() {
+        assert!(is_internal_only_host("internal-server.local"));
+        assert!(is_internal_only_host("INTERNAL-server.local"));
+        assert!(!is_internal_only_host("mc.example.com"));
+        assert!(!is_internal_only_host("192.168.1.1"));
+    }
+
+    #[test]
+    fn test_resolve_state_ports_ignores_default_java_for_hostname() {
+        let server = serde_json::json!({"ping_port": 25565});
+        let (port, _) = resolve_state_ports(&server, "mc.example.com", None, Edition::Java);
+        // Should ignore 25565 for hostname to honor SRV.
+        assert_eq!(port, None);
+    }
+
+    #[test]
+    fn test_resolve_state_ports_keeps_default_java_for_ip() {
+        let server = serde_json::json!({"ping_port": 25565});
+        let (port, _) = resolve_state_ports(&server, "192.168.1.1", None, Edition::Java);
+        assert_eq!(port, Some(25565));
+    }
+
+    #[test]
+    fn test_resolve_state_ports_custom_port() {
+        let server = serde_json::json!({"ping_port": 25566});
+        let (port, _) = resolve_state_ports(&server, "mc.example.com", None, Edition::Java);
+        assert_eq!(port, Some(25566));
+    }
+
+    #[test]
+    fn test_resolve_state_ports_bedrock_fallback() {
+        let server = serde_json::json!({"bedrock_port": 19133});
+        let (port, bedrock_port) =
+            resolve_state_ports(&server, "mc.example.com", None, Edition::Bedrock);
+        assert_eq!(port, Some(19133));
+        assert_eq!(bedrock_port, Some(19133));
+    }
+
+    #[test]
+    fn test_wants_bedrock_probe() {
+        let java = serde_json::json!({"game_edition": "java"});
+        assert!(wants_bedrock_probe(&java, 3600));
+
+        let bedrock = serde_json::json!({"game_edition": "bedrock"});
+        assert!(!wants_bedrock_probe(&bedrock, 3600));
+
+        // Disabled interval.
+        assert!(!wants_bedrock_probe(&java, 0));
+    }
+
+    #[test]
+    fn test_build_state() {
+        let server = serde_json::json!({
+            "id": "12345",
+            "ip_or_domain": "mc.example.com:25566",
+            "game_edition": "java",
+        });
+        let state = build_state(server, 100.0, 60, 3600);
+        assert_eq!(state.server_id, "12345");
+        assert_eq!(state.host, "mc.example.com");
+        assert_eq!(state.port, Some(25566));
+        assert_eq!(state.edition, Edition::Java);
+        assert!(!state.has_emitted_state);
+        assert!(state.next_due >= 100.0);
+        assert!(state.next_due <= 160.0);
+    }
+}

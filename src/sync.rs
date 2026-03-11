@@ -445,3 +445,56 @@ pub async fn redis_force_ping_loop(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_empty_content() {
+        assert_eq!(parse_trigger_content(""), Some(vec![]));
+        assert_eq!(parse_trigger_content("  "), Some(vec![]));
+    }
+
+    #[test]
+    fn test_all_keyword() {
+        assert_eq!(parse_trigger_content("all"), None);
+        assert_eq!(parse_trigger_content("ALL"), None);
+        assert_eq!(parse_trigger_content("*"), None);
+    }
+
+    #[test]
+    fn test_comma_separated() {
+        let result = parse_trigger_content("1,2,3").unwrap();
+        assert_eq!(result, vec!["1", "2", "3"]);
+    }
+
+    #[test]
+    fn test_space_separated() {
+        let result = parse_trigger_content("10 20 30").unwrap();
+        assert_eq!(result, vec!["10", "20", "30"]);
+    }
+
+    #[test]
+    fn test_json_object_with_server_ids() {
+        let result = parse_trigger_content(r#"{"server_ids": ["1", "2"]}"#).unwrap();
+        assert_eq!(result, vec!["1", "2"]);
+    }
+
+    #[test]
+    fn test_json_object_with_all() {
+        assert_eq!(parse_trigger_content(r#"{"all": true}"#), None);
+    }
+
+    #[test]
+    fn test_json_array() {
+        let result = parse_trigger_content(r#"["5", "10"]"#).unwrap();
+        assert_eq!(result, vec!["5", "10"]);
+    }
+
+    #[test]
+    fn test_json_numeric_ids() {
+        let result = parse_trigger_content(r#"{"ids": [1, 2, 3]}"#).unwrap();
+        assert_eq!(result, vec!["1", "2", "3"]);
+    }
+}

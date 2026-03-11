@@ -1,4 +1,4 @@
-//! Minecraft server status polling via the Server List Ping protocol.
+//! Minecraft server status polling via SLP (Java) and RakNet (Bedrock).
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -10,13 +10,14 @@ use sha2::{Digest, Sha256};
 use tokio::net::TcpStream;
 use tracing::{debug, info, warn};
 
+use crate::bedrock;
 use crate::config::Settings;
 use crate::geo::GeoCache;
 use crate::metrics::{
     BEDROCK_PROBE_DURATION, BEDROCK_PROBE_FAILURE, BEDROCK_PROBE_INFLIGHT,
     BEDROCK_PROBE_SUCCESS,
 };
-use crate::models::{ServerState, schedule_next_bedrock_probe};
+use crate::models::{Edition, ServerState, schedule_next_bedrock_probe};
 
 /// Result of polling one server.
 pub struct PollResult {
@@ -25,7 +26,9 @@ pub struct PollResult {
     pub favicon: String,
 }
 
-/// Poll a single Minecraft server using the SLP (Server List Ping) protocol.
+/// Poll a single Minecraft server.
+///
+/// Uses SLP (TCP) for Java edition and RakNet Unconnected Ping (UDP) for Bedrock.
 pub async fn poll_server(
     http: &Client,
     state: &ServerState,
@@ -43,10 +46,39 @@ pub async fn poll_server(
     let port = state.port.unwrap_or(state.edition.default_port());
     let timeout = Duration::from_secs_f64(settings.collector.status_timeout_seconds);
 
-    // Connect TCP then SLP ping.
+    let fail_payload = || {
+        json!({
+            "server_id": state.server_id,
+            "collected_at": collected_at,
+            "online": null,
+            "max_players": null,
+            "version": "",
+            "motd": "",
+            "country": country,
+            "country_code": country_code,
+        })
+    };
+
+    match state.edition {
+        Edition::Bedrock => poll_bedrock(state, &host, port, timeout, &collected_at, &country, &country_code, fail_payload).await,
+        Edition::Java => poll_java(state, &host, port, timeout, &collected_at, &country, &country_code, fail_payload).await,
+    }
+}
+
+/// Poll a Java edition server via SLP (Server List Ping over TCP).
+async fn poll_java(
+    state: &ServerState,
+    host: &str,
+    port: u16,
+    timeout: Duration,
+    collected_at: &str,
+    country: &str,
+    country_code: &str,
+    fail_payload: impl FnOnce() -> Value,
+) -> PollResult {
     let ping_result = tokio::time::timeout(timeout, async {
-        let mut stream = TcpStream::connect((&*host, port)).await?;
-        craftping::tokio::ping(&mut stream, &host, port).await
+        let mut stream = TcpStream::connect((host, port)).await?;
+        craftping::tokio::ping(&mut stream, host, port).await
     })
     .await;
 
@@ -56,14 +88,13 @@ pub async fn poll_server(
             let max_players = response.max_players;
             let version = response.version.clone();
 
-            // MOTD: Chat has a text field; use Display or raw text.
             let motd = response
                 .description
                 .as_ref()
                 .map(|d| d.text.clone())
                 .unwrap_or_default();
 
-            // Favicon is Option<Vec<u8>> (PNG bytes); encode as data URL.
+            // Favicon: Option<Vec<u8>> (raw PNG) → data URL.
             let favicon = response
                 .favicon
                 .as_ref()
@@ -75,7 +106,7 @@ pub async fn poll_server(
                 })
                 .unwrap_or_default();
 
-            // Extract player sample.
+            // Player sample.
             let players: Vec<String> = response
                 .sample
                 .as_ref()
@@ -117,35 +148,66 @@ pub async fn poll_server(
             }
         }
         Ok(Err(e)) => {
-            debug!("Status failed for {host}:{port}: {e}");
+            debug!("Java status failed for {host}:{port}: {e}");
             PollResult {
-                payload: json!({
-                    "server_id": state.server_id,
-                    "collected_at": collected_at,
-                    "online": null,
-                    "max_players": null,
-                    "version": "",
-                    "motd": "",
-                    "country": country,
-                    "country_code": country_code,
-                }),
+                payload: fail_payload(),
                 status_ok: false,
                 favicon: String::new(),
             }
         }
         Err(_) => {
-            debug!("Status timed out for {host}:{port}");
+            debug!("Java status timed out for {host}:{port}");
+            PollResult {
+                payload: fail_payload(),
+                status_ok: false,
+                favicon: String::new(),
+            }
+        }
+    }
+}
+
+/// Poll a Bedrock edition server via RakNet Unconnected Ping (UDP).
+async fn poll_bedrock(
+    state: &ServerState,
+    host: &str,
+    port: u16,
+    timeout: Duration,
+    collected_at: &str,
+    country: &str,
+    country_code: &str,
+    fail_payload: impl FnOnce() -> Value,
+) -> PollResult {
+    match bedrock::ping_bedrock(host, port, timeout).await {
+        Some(status) => {
+            let motd = if status.motd_line2.is_empty() {
+                status.motd.clone()
+            } else {
+                format!("{}\n{}", status.motd, status.motd_line2)
+            };
+
             PollResult {
                 payload: json!({
                     "server_id": state.server_id,
                     "collected_at": collected_at,
-                    "online": null,
-                    "max_players": null,
-                    "version": "",
-                    "motd": "",
+                    "online": status.online_players,
+                    "max_players": status.max_players,
+                    "version": status.version,
+                    "motd": motd,
                     "country": country,
                     "country_code": country_code,
+                    "extra": {
+                        "edition": status.edition,
+                        "gamemode": status.gamemode,
+                    },
                 }),
+                status_ok: true,
+                favicon: String::new(), // Bedrock doesn't have favicons.
+            }
+        }
+        None => {
+            debug!("Bedrock status failed for {host}:{port}");
+            PollResult {
+                payload: fail_payload(),
                 status_ok: false,
                 favicon: String::new(),
             }
@@ -198,22 +260,9 @@ pub async fn maybe_update_favicon(
     }
 }
 
-/// Probe whether a Java server also supports Bedrock connections.
+/// Probe whether a Java server also supports Bedrock via RakNet.
 pub async fn probe_bedrock_support(host: &str, port: u16, timeout: Duration) -> bool {
-    // Bedrock uses RakNet (UDP) — craftping only supports Java SLP (TCP).
-    // Try a TCP SLP ping on the bedrock port as a basic connectivity check.
-    let result = tokio::time::timeout(timeout, async {
-        let mut stream = TcpStream::connect((host, port)).await?;
-        craftping::tokio::ping(&mut stream, host, port).await
-    })
-    .await;
-    match result {
-        Ok(Ok(_)) => true,
-        _ => {
-            debug!("Bedrock probe failed for {host}:{port}");
-            false
-        }
-    }
+    bedrock::ping_bedrock(host, port, timeout).await.is_some()
 }
 
 /// Check and potentially probe bedrock support, updating state and server-service.
@@ -223,10 +272,9 @@ pub async fn maybe_probe_bedrock(
     state: &mut ServerState,
     settings: &Settings,
 ) {
-    let _next_probe = match state.next_bedrock_probe {
-        Some(t) => t,
-        None => return,
-    };
+    if state.next_bedrock_probe.is_none() {
+        return;
+    }
 
     let bedrock_port = state
         .bedrock_port
@@ -243,7 +291,6 @@ pub async fn maybe_probe_bedrock(
 
     if ok {
         BEDROCK_PROBE_SUCCESS.inc();
-        // Update edition on server-service.
         if let Some(hdrs) = headers {
             let url = format!(
                 "{}/internal/servers/{}/edition",
@@ -276,7 +323,6 @@ pub async fn maybe_probe_bedrock(
         BEDROCK_PROBE_FAILURE.inc();
     }
 
-    // Schedule next probe.
     state.next_bedrock_probe = schedule_next_bedrock_probe(
         &state.server,
         0.0,

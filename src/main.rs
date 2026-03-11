@@ -1,3 +1,4 @@
+mod bedrock;
 mod change_detection;
 mod collector;
 mod config;
