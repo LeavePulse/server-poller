@@ -1,11 +1,13 @@
 //! Minecraft server status polling via SLP (Java) and RakNet (Bedrock).
 
+use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream as StdTcpStream};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use reqwest::Client;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
@@ -23,6 +25,40 @@ pub struct PollResult {
     pub payload: Value,
     pub status_ok: bool,
     pub favicon: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct JavaStatusVersion {
+    #[serde(default)]
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct JavaStatusPlayer {
+    #[serde(default)]
+    name: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct JavaStatusPlayers {
+    #[serde(default)]
+    max: usize,
+    #[serde(default)]
+    online: usize,
+    #[serde(default)]
+    sample: Option<Vec<JavaStatusPlayer>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct JavaStatusResponse {
+    #[serde(default)]
+    version: JavaStatusVersion,
+    #[serde(default)]
+    players: JavaStatusPlayers,
+    #[serde(default)]
+    description: Option<Value>,
+    #[serde(default)]
+    favicon: Option<String>,
 }
 
 /// Poll a single Minecraft server.
@@ -129,47 +165,18 @@ async fn poll_java(
 
     match ping_result {
         Ok(Ok(response)) => {
-            let online = response.online_players;
-            let max_players = response.max_players;
-            let version = response.version.clone();
-
-            let motd = response
-                .description
-                .as_ref()
-                .map(|d| d.text.clone())
-                .unwrap_or_default();
-
-            // Favicon: Option<Vec<u8>> (raw PNG) → data URL.
+            let online = response.players.online;
+            let max_players = response.players.max;
+            let version = response.version.name.clone();
+            let motd = motd_from_description(response.description.as_ref());
             let favicon = response
                 .favicon
                 .as_ref()
-                .filter(|v| !v.is_empty())
-                .map(|v| {
-                    use base64::Engine;
-                    let b64 = base64::engine::general_purpose::STANDARD.encode(v);
-                    format!("data:image/png;base64,{b64}")
-                })
+                .filter(|v| !v.is_empty() && v.starts_with("data:image/"))
+                .cloned()
                 .unwrap_or_default();
 
-            // Player sample.
-            let players: Vec<String> = response
-                .sample
-                .as_ref()
-                .map(|sample: &Vec<craftping::Player>| {
-                    let mut seen = std::collections::HashSet::new();
-                    sample
-                        .iter()
-                        .filter_map(|p| {
-                            let name = p.name.trim().to_string();
-                            if name.is_empty() || !seen.insert(name.clone()) {
-                                None
-                            } else {
-                                Some(name)
-                            }
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
+            let players = extract_player_names(response.players.sample.as_deref());
 
             let mut extra = serde_json::Map::new();
             if !players.is_empty() {
@@ -216,13 +223,14 @@ fn ping_java_status_blocking(
     host: &str,
     port: u16,
     timeout: Duration,
-) -> Result<craftping::Response, String> {
+) -> Result<JavaStatusResponse, String> {
     if socket_addrs.is_empty() {
         return Err("no socket addresses resolved".to_string());
     }
 
     let started = Instant::now();
     let mut last_error = None;
+    let request = build_java_status_request(host, port);
 
     for socket_addr in socket_addrs {
         let elapsed = started.elapsed();
@@ -238,7 +246,33 @@ fn ping_java_status_blocking(
                 if let Err(e) = stream.set_write_timeout(Some(remaining)) {
                     return Err(format!("failed to set write timeout: {e}"));
                 }
-                return craftping::sync::ping(&mut stream, host, port).map_err(|e| e.to_string());
+                if let Err(e) = stream.write_all(&request) {
+                    return Err(format!("failed to write status request: {e}"));
+                }
+                if let Err(e) = stream.flush() {
+                    return Err(format!("failed to flush status request: {e}"));
+                }
+
+                let _packet_length = read_varint(&mut stream)
+                    .map_err(|e| format!("failed to read packet length: {e}"))?;
+                let packet_id = read_varint(&mut stream)
+                    .map_err(|e| format!("failed to read packet id: {e}"))?;
+                if packet_id != 0 {
+                    return Err(format!("unexpected packet id: {packet_id}"));
+                }
+                let response_length = read_varint(&mut stream)
+                    .map_err(|e| format!("failed to read response length: {e}"))?;
+                if response_length < 0 {
+                    return Err("negative response length".to_string());
+                }
+
+                let mut response_buffer = vec![0; response_length as usize];
+                if let Err(e) = stream.read_exact(&mut response_buffer) {
+                    return Err(format!("failed to read response body: {e}"));
+                }
+
+                return serde_json::from_slice(&response_buffer)
+                    .map_err(|e| format!("failed to decode status json: {e}"));
             }
             Err(e) => {
                 last_error = Some(format!("{socket_addr}: {e}"));
@@ -247,6 +281,105 @@ fn ping_java_status_blocking(
     }
 
     Err(last_error.unwrap_or_else(|| "java status connect failed".to_string()))
+}
+
+fn build_java_status_request(host: &str, port: u16) -> Vec<u8> {
+    let mut handshake = vec![0x00];
+    write_varint(&mut handshake, -1);
+    write_varint(&mut handshake, host.len() as i32);
+    handshake.extend_from_slice(host.as_bytes());
+    handshake.extend_from_slice(&port.to_be_bytes());
+    write_varint(&mut handshake, 1);
+
+    let mut request = Vec::new();
+    write_varint(&mut request, handshake.len() as i32);
+    request.extend_from_slice(&handshake);
+    request.push(0x01);
+    request.push(0x00);
+    request
+}
+
+fn write_varint(buffer: &mut Vec<u8>, mut value: i32) {
+    loop {
+        let mut current = (value & 0x7f) as u8;
+        value >>= 7;
+        value &= 0x01_ff_ff_ff;
+        if value != 0 {
+            current |= 0x80;
+        }
+        buffer.push(current);
+        if value == 0 {
+            break;
+        }
+    }
+}
+
+fn read_varint(reader: &mut impl Read) -> std::io::Result<i32> {
+    let mut buffer = [0u8; 1];
+    let mut result = 0;
+    let mut read_count = 0u32;
+
+    loop {
+        reader.read_exact(&mut buffer)?;
+        result |= ((buffer[0] & 0x7f) as i32)
+            .checked_shl(7 * read_count)
+            .unwrap_or(0);
+
+        read_count += 1;
+        if read_count > 5 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "varint is too long",
+            ));
+        }
+        if (buffer[0] & 0x80) == 0 {
+            return Ok(result);
+        }
+    }
+}
+
+fn extract_player_names(sample: Option<&[JavaStatusPlayer]>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    sample
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|player| {
+            let name = player.name.trim().to_string();
+            if name.is_empty() || !seen.insert(name.clone()) {
+                None
+            } else {
+                Some(name)
+            }
+        })
+        .collect()
+}
+
+fn motd_from_description(description: Option<&Value>) -> String {
+    let mut motd = String::new();
+    if let Some(value) = description {
+        append_chat_text(value, &mut motd);
+    }
+    motd
+}
+
+fn append_chat_text(value: &Value, output: &mut String) {
+    match value {
+        Value::String(text) => output.push_str(text),
+        Value::Array(items) => {
+            for item in items {
+                append_chat_text(item, output);
+            }
+        }
+        Value::Object(map) => {
+            if let Some(text) = map.get("text").and_then(Value::as_str) {
+                output.push_str(text);
+            }
+            if let Some(extra) = map.get("extra") {
+                append_chat_text(extra, output);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Poll a Bedrock edition server via RakNet Unconnected Ping (UDP).
@@ -435,21 +568,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    use super::ping_java_status_blocking;
-
-    fn write_varint(buffer: &mut Vec<u8>, mut value: i32) {
-        loop {
-            let mut current = (value & 0x7f) as u8;
-            value >>= 7;
-            if value != 0 {
-                current |= 0x80;
-            }
-            buffer.push(current);
-            if value == 0 {
-                break;
-            }
-        }
-    }
+    use super::{motd_from_description, ping_java_status_blocking, write_varint};
 
     fn build_latest_response(json_bytes: &[u8]) -> Vec<u8> {
         let mut packet = Vec::new();
@@ -493,12 +612,12 @@ mod tests {
         .unwrap()
         .unwrap();
 
-        assert_eq!(response.online_players, 30);
-        assert_eq!(response.max_players, 777);
-        assert_eq!(response.version, "Velocity 1.7.2-1.21.11");
+        assert_eq!(response.players.online, 30);
+        assert_eq!(response.players.max, 777);
+        assert_eq!(response.version.name, "Velocity 1.7.2-1.21.11");
         assert_eq!(
-            response.description.as_ref().map(|d| d.text.as_str()),
-            Some("Minecrafter")
+            motd_from_description(response.description.as_ref()),
+            "Minecrafter"
         );
     }
 }
