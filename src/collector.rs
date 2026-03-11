@@ -300,11 +300,12 @@ async fn process_work_item(
     let max_slow_interval = settings.collector.initial_failure_max_interval_seconds as f64;
 
     // Read state snapshot for polling.
-    let (host, edition, plugin_managed, server_id) = {
+    let (host, port, edition, plugin_managed, server_id) = {
         let map = states.lock().await;
         match map.get(&key) {
             Some(s) => (
                 s.host.clone(),
+                s.port,
                 s.edition,
                 s.plugin_managed,
                 s.server_id.clone(),
@@ -328,16 +329,8 @@ async fn process_work_item(
     let start = Instant::now();
     POLL_INFLIGHT.inc();
 
-    let poll_result = {
-        let map = states.lock().await;
-        match map.get(&key) {
-            Some(state) => poll_server(http, state, geo_cache, settings).await,
-            None => {
-                POLL_INFLIGHT.dec();
-                return;
-            }
-        }
-    };
+    let poll_result =
+        poll_server(http, &server_id, &host, port, edition, geo_cache, settings).await;
 
     POLL_INFLIGHT.dec();
     POLL_DURATION

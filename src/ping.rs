@@ -30,24 +30,24 @@ pub struct PollResult {
 /// Uses SLP (TCP) for Java edition and RakNet Unconnected Ping (UDP) for Bedrock.
 pub async fn poll_server(
     http: &Client,
-    state: &ServerState,
+    server_id: &str,
+    host: &str,
+    port: Option<u16>,
+    edition: Edition,
     geo_cache: &Arc<GeoCache>,
     settings: &Settings,
 ) -> PollResult {
     let now = Utc::now().naive_utc();
     let collected_at = now.format("%Y-%m-%dT%H:%M:%S%.6f").to_string();
 
-    let (country, country_code) = geo_cache
-        .fetch_geo(http, &state.host, state.port, state.edition)
-        .await;
+    let (country, country_code) = geo_cache.fetch_geo(http, host, port, edition).await;
 
-    let host = state.host.clone();
-    let port = state.port.unwrap_or(state.edition.default_port());
+    let port = port.unwrap_or(edition.default_port());
     let timeout = Duration::from_secs_f64(settings.collector.status_timeout_seconds);
 
     let fail_payload = || {
         json!({
-            "server_id": state.server_id,
+            "server_id": server_id,
             "collected_at": collected_at,
             "online": null,
             "max_players": null,
@@ -58,11 +58,11 @@ pub async fn poll_server(
         })
     };
 
-    match state.edition {
+    match edition {
         Edition::Bedrock => {
             poll_bedrock(
-                state,
-                &host,
+                server_id,
+                host,
                 port,
                 timeout,
                 &collected_at,
@@ -74,8 +74,8 @@ pub async fn poll_server(
         }
         Edition::Java => {
             poll_java(
-                state,
-                &host,
+                server_id,
+                host,
                 port,
                 timeout,
                 &collected_at,
@@ -91,7 +91,7 @@ pub async fn poll_server(
 /// Poll a Java edition server via SLP (Server List Ping over TCP).
 #[allow(clippy::too_many_arguments)]
 async fn poll_java(
-    state: &ServerState,
+    server_id: &str,
     host: &str,
     port: u16,
     timeout: Duration,
@@ -157,7 +157,7 @@ async fn poll_java(
 
             PollResult {
                 payload: json!({
-                    "server_id": state.server_id,
+                    "server_id": server_id,
                     "collected_at": collected_at,
                     "online": online,
                     "max_players": max_players,
@@ -172,7 +172,7 @@ async fn poll_java(
             }
         }
         Ok(Err(e)) => {
-            debug!("Java status failed for {host}:{port}: {e}");
+            debug!("Java status failed for server {server_id} {host}:{port}: {e}");
             PollResult {
                 payload: fail_payload(),
                 status_ok: false,
@@ -180,7 +180,7 @@ async fn poll_java(
             }
         }
         Err(_) => {
-            debug!("Java status timed out for {host}:{port}");
+            debug!("Java status timed out for server {server_id} {host}:{port}");
             PollResult {
                 payload: fail_payload(),
                 status_ok: false,
@@ -193,7 +193,7 @@ async fn poll_java(
 /// Poll a Bedrock edition server via RakNet Unconnected Ping (UDP).
 #[allow(clippy::too_many_arguments)]
 async fn poll_bedrock(
-    state: &ServerState,
+    server_id: &str,
     host: &str,
     port: u16,
     timeout: Duration,
@@ -212,7 +212,7 @@ async fn poll_bedrock(
 
             PollResult {
                 payload: json!({
-                    "server_id": state.server_id,
+                    "server_id": server_id,
                     "collected_at": collected_at,
                     "online": status.online_players,
                     "max_players": status.max_players,
@@ -230,7 +230,7 @@ async fn poll_bedrock(
             }
         }
         None => {
-            debug!("Bedrock status failed for {host}:{port}");
+            debug!("Bedrock status failed for server {server_id} {host}:{port}");
             PollResult {
                 payload: fail_payload(),
                 status_ok: false,
