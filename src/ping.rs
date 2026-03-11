@@ -310,7 +310,7 @@ fn ping_java_status_blocking(
 
     let started = Instant::now();
     let mut last_error = None;
-    let request = build_java_status_request(host, port);
+    let (handshake_request, status_request) = build_java_status_requests(host, port);
 
     for socket_addr in socket_addrs {
         let elapsed = started.elapsed();
@@ -320,13 +320,22 @@ fn ping_java_status_blocking(
 
         match StdTcpStream::connect_timeout(&socket_addr, remaining) {
             Ok(mut stream) => {
+                if let Err(e) = stream.set_nodelay(true) {
+                    return Err(format!("failed to set tcp nodelay: {e}"));
+                }
                 if let Err(e) = stream.set_read_timeout(Some(remaining)) {
                     return Err(format!("failed to set read timeout: {e}"));
                 }
                 if let Err(e) = stream.set_write_timeout(Some(remaining)) {
                     return Err(format!("failed to set write timeout: {e}"));
                 }
-                if let Err(e) = stream.write_all(&request) {
+                if let Err(e) = stream.write_all(&handshake_request) {
+                    return Err(format!("failed to write handshake request: {e}"));
+                }
+                if let Err(e) = stream.flush() {
+                    return Err(format!("failed to flush handshake request: {e}"));
+                }
+                if let Err(e) = stream.write_all(&status_request) {
                     return Err(format!("failed to write status request: {e}"));
                 }
                 if let Err(e) = stream.flush() {
@@ -363,7 +372,7 @@ fn ping_java_status_blocking(
     Err(last_error.unwrap_or_else(|| "java status connect failed".to_string()))
 }
 
-fn build_java_status_request(host: &str, port: u16) -> Vec<u8> {
+fn build_java_status_requests(host: &str, port: u16) -> (Vec<u8>, Vec<u8>) {
     let mut handshake = vec![0x00];
     write_varint(&mut handshake, -1);
     write_varint(&mut handshake, host.len() as i32);
@@ -371,12 +380,12 @@ fn build_java_status_request(host: &str, port: u16) -> Vec<u8> {
     handshake.extend_from_slice(&port.to_be_bytes());
     write_varint(&mut handshake, 1);
 
-    let mut request = Vec::new();
-    write_varint(&mut request, handshake.len() as i32);
-    request.extend_from_slice(&handshake);
-    request.push(0x01);
-    request.push(0x00);
-    request
+    let mut handshake_request = Vec::new();
+    write_varint(&mut handshake_request, handshake.len() as i32);
+    handshake_request.extend_from_slice(&handshake);
+
+    let status_request = vec![0x01, 0x00];
+    (handshake_request, status_request)
 }
 
 fn write_varint(buffer: &mut Vec<u8>, mut value: i32) {
