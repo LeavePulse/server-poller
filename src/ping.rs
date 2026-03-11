@@ -1,5 +1,6 @@
 //! Minecraft server status polling via SLP (Java) and RakNet (Bedrock).
 
+use std::net::{SocketAddr, TcpStream as StdTcpStream};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -7,7 +8,6 @@ use chrono::Utc;
 use reqwest::Client;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tokio::net::TcpStream;
 use tracing::{debug, info, warn};
 
 use crate::bedrock;
@@ -100,9 +100,30 @@ async fn poll_java(
     country_code: &str,
     fail_payload: impl FnOnce() -> Value,
 ) -> PollResult {
-    let ping_result = tokio::time::timeout(timeout, async {
-        let mut stream = TcpStream::connect((host, port)).await?;
-        craftping::tokio::ping(&mut stream, host, port).await
+    let socket_addrs =
+        match tokio::time::timeout(timeout, tokio::net::lookup_host((host, port))).await {
+            Ok(Ok(addrs)) => addrs.collect::<Vec<_>>(),
+            Ok(Err(e)) => {
+                debug!("Java status DNS lookup failed for server {server_id} {host}:{port}: {e}");
+                return PollResult {
+                    payload: fail_payload(),
+                    status_ok: false,
+                    favicon: String::new(),
+                };
+            }
+            Err(_) => {
+                debug!("Java status DNS lookup timed out for server {server_id} {host}:{port}");
+                return PollResult {
+                    payload: fail_payload(),
+                    status_ok: false,
+                    favicon: String::new(),
+                };
+            }
+        };
+
+    let handshake_host = host.to_string();
+    let ping_result = tokio::task::spawn_blocking(move || {
+        ping_java_status_blocking(socket_addrs, &handshake_host, port, timeout)
     })
     .await;
 
@@ -179,8 +200,8 @@ async fn poll_java(
                 favicon: String::new(),
             }
         }
-        Err(_) => {
-            debug!("Java status timed out for server {server_id} {host}:{port}");
+        Err(e) => {
+            debug!("Java status worker failed for server {server_id} {host}:{port}: {e}");
             PollResult {
                 payload: fail_payload(),
                 status_ok: false,
@@ -188,6 +209,44 @@ async fn poll_java(
             }
         }
     }
+}
+
+fn ping_java_status_blocking(
+    socket_addrs: Vec<SocketAddr>,
+    host: &str,
+    port: u16,
+    timeout: Duration,
+) -> Result<craftping::Response, String> {
+    if socket_addrs.is_empty() {
+        return Err("no socket addresses resolved".to_string());
+    }
+
+    let started = Instant::now();
+    let mut last_error = None;
+
+    for socket_addr in socket_addrs {
+        let elapsed = started.elapsed();
+        let Some(remaining) = timeout.checked_sub(elapsed) else {
+            return Err(last_error.unwrap_or_else(|| "java status timed out".to_string()));
+        };
+
+        match StdTcpStream::connect_timeout(&socket_addr, remaining) {
+            Ok(mut stream) => {
+                if let Err(e) = stream.set_read_timeout(Some(remaining)) {
+                    return Err(format!("failed to set read timeout: {e}"));
+                }
+                if let Err(e) = stream.set_write_timeout(Some(remaining)) {
+                    return Err(format!("failed to set write timeout: {e}"));
+                }
+                return craftping::sync::ping(&mut stream, host, port).map_err(|e| e.to_string());
+            }
+            Err(e) => {
+                last_error = Some(format!("{socket_addr}: {e}"));
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| "java status connect failed".to_string()))
 }
 
 /// Poll a Bedrock edition server via RakNet Unconnected Ping (UDP).
@@ -366,4 +425,80 @@ pub async fn maybe_probe_bedrock(
         settings.collector.bedrock_probe_interval_seconds,
         settings.collector.bedrock_probe_jitter_seconds,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{Ipv4Addr, SocketAddrV4};
+    use std::time::Duration;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    use super::ping_java_status_blocking;
+
+    fn write_varint(buffer: &mut Vec<u8>, mut value: i32) {
+        loop {
+            let mut current = (value & 0x7f) as u8;
+            value >>= 7;
+            if value != 0 {
+                current |= 0x80;
+            }
+            buffer.push(current);
+            if value == 0 {
+                break;
+            }
+        }
+    }
+
+    fn build_latest_response(json_bytes: &[u8]) -> Vec<u8> {
+        let mut packet = Vec::new();
+        write_varint(&mut packet, 0x00);
+        write_varint(&mut packet, json_bytes.len() as i32);
+        packet.extend_from_slice(json_bytes);
+
+        let mut full = Vec::new();
+        write_varint(&mut full, packet.len() as i32);
+        full.extend_from_slice(&packet);
+        full
+    }
+
+    #[tokio::test]
+    async fn blocking_java_ping_parses_latest_status() {
+        let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 512];
+            let _ = socket.read(&mut request).await.unwrap();
+
+            let response = build_latest_response(
+                br#"{"version":{"name":"Velocity 1.7.2-1.21.11","protocol":767},"players":{"max":777,"online":30,"sample":[{"name":"Alice","id":"1"}]},"description":{"text":"Minecrafter"}}"#,
+            );
+            socket.write_all(&response).await.unwrap();
+        });
+
+        let response = tokio::task::spawn_blocking(move || {
+            ping_java_status_blocking(
+                vec![addr],
+                "play.minecrafter.in.ua",
+                addr.port(),
+                Duration::from_secs(2),
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(response.online_players, 30);
+        assert_eq!(response.max_players, 777);
+        assert_eq!(response.version, "Velocity 1.7.2-1.21.11");
+        assert_eq!(
+            response.description.as_ref().map(|d| d.text.as_str()),
+            Some("Minecrafter")
+        );
+    }
 }
