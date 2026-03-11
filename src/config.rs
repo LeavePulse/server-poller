@@ -134,11 +134,14 @@ impl Settings {
         let env_file = env_str("ENV_FILE", ".env");
         let _ = dotenvy::from_filename(&env_file);
 
-        let online_interval =
-            env_u64("COLLECTOR_ONLINE_INTERVAL_SECONDS", 0)
-                .max(env_u64("ONLINE_INTERVAL_SECONDS", 0))
-                .max(env_u64("INTERVAL_SECONDS", 0));
-        let online_interval = if online_interval > 0 { online_interval } else { 300 };
+        let online_interval = env_u64("COLLECTOR_ONLINE_INTERVAL_SECONDS", 0)
+            .max(env_u64("ONLINE_INTERVAL_SECONDS", 0))
+            .max(env_u64("INTERVAL_SECONDS", 0));
+        let online_interval = if online_interval > 0 {
+            online_interval
+        } else {
+            300
+        };
 
         let offline_interval = env_u64("COLLECTOR_OFFLINE_INTERVAL_SECONDS", 0)
             .max(env_u64("OFFLINE_INTERVAL_SECONDS", 0));
@@ -160,8 +163,8 @@ impl Settings {
         let server_api = env_str_opt("SERVER_API")
             .or_else(|| env_str_opt("CORE_API"))
             .unwrap_or_else(|| "http://server-service:8201".to_string());
-        let server_api_token = env_str_opt("SERVER_API_TOKEN")
-            .or_else(|| env_str_opt("CORE_API_TOKEN"));
+        let server_api_token =
+            env_str_opt("SERVER_API_TOKEN").or_else(|| env_str_opt("CORE_API_TOKEN"));
 
         Settings {
             service_name: env_str("SERVICE_NAME", "unverified-collector"),
@@ -272,18 +275,9 @@ impl Settings {
             },
 
             prometheus: PrometheusSettings {
-                enabled: env_bool(
-                    "PROMETHEUS_ENABLED",
-                    env_bool("METRICS_ENABLED", true),
-                ),
-                host: env_str(
-                    "PROMETHEUS_HOST",
-                    &env_str("METRICS_HOST", "0.0.0.0"),
-                ),
-                port: env_u16(
-                    "PROMETHEUS_PORT",
-                    env_u16("METRICS_PORT", 9100),
-                ),
+                enabled: env_bool("PROMETHEUS_ENABLED", env_bool("METRICS_ENABLED", true)),
+                host: env_str("PROMETHEUS_HOST", &env_str("METRICS_HOST", "0.0.0.0")),
+                port: env_u16("PROMETHEUS_PORT", env_u16("METRICS_PORT", 9100)),
                 update_seconds: env_f64(
                     "PROMETHEUS_UPDATE_SECONDS",
                     env_f64("METRICS_UPDATE_SECONDS", 5.0),

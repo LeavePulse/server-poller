@@ -18,8 +18,7 @@ async fn main() {
     let settings = Settings::load();
 
     // Initialize tracing.
-    let filter = EnvFilter::try_new(&settings.log_level)
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_new(&settings.log_level).unwrap_or_else(|_| EnvFilter::new("info"));
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(true)

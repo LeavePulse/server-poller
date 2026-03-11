@@ -86,25 +86,25 @@ pub struct ServerListResponse {
 /// Parse "host[:port]" including IPv6 bracket notation.
 pub fn parse_address(value: &str) -> (String, Option<u16>) {
     // IPv6 bracket notation: [::1]:25565
-    if value.starts_with('[') {
-        if let Some(bracket_end) = value.find(']') {
-            let host = &value[1..bracket_end];
-            let rest = &value[bracket_end + 1..];
-            if let Some(port_str) = rest.strip_prefix(':') {
-                if let Ok(port) = port_str.parse::<u16>() {
-                    return (host.to_string(), Some(port));
-                }
-            }
-            return (host.to_string(), None);
+    if value.starts_with('[')
+        && let Some(bracket_end) = value.find(']')
+    {
+        let host = &value[1..bracket_end];
+        let rest = &value[bracket_end + 1..];
+        if let Some(port_str) = rest.strip_prefix(':')
+            && let Ok(port) = port_str.parse::<u16>()
+        {
+            return (host.to_string(), Some(port));
         }
+        return (host.to_string(), None);
     }
     // Regular host:port — only if exactly one colon (not raw IPv6)
-    if value.contains(':') && value.matches(':').count() == 1 {
-        if let Some((host, port_str)) = value.rsplit_once(':') {
-            if let Ok(port) = port_str.parse::<u16>() {
-                return (host.to_string(), Some(port));
-            }
-        }
+    if value.contains(':')
+        && value.matches(':').count() == 1
+        && let Some((host, port_str)) = value.rsplit_once(':')
+        && let Ok(port) = port_str.parse::<u16>()
+    {
+        return (host.to_string(), Some(port));
     }
     (value.to_string(), None)
 }
@@ -129,13 +129,11 @@ pub fn resolve_state_ports(
 ) -> (Option<u16>, Option<u16>) {
     let mut port = parsed_port;
 
-    let ping_port = server
-        .get("ping_port")
-        .and_then(|v| match v {
-            Value::Number(n) => n.as_u64().map(|n| n as u16),
-            Value::String(s) => s.parse::<u16>().ok(),
-            _ => None,
-        });
+    let ping_port = server.get("ping_port").and_then(|v| match v {
+        Value::Number(n) => n.as_u64().map(|n| n as u16),
+        Value::String(s) => s.parse::<u16>().ok(),
+        _ => None,
+    });
 
     if let Some(pp) = ping_port {
         // Ignore default Java port for hostname targets to honor SRV records.
@@ -146,19 +144,18 @@ pub fn resolve_state_ports(
         }
     }
 
-    let bedrock_port = server
-        .get("bedrock_port")
-        .and_then(|v| match v {
-            Value::Number(n) => n.as_u64().map(|n| n as u16),
-            Value::String(s) => s.parse::<u16>().ok(),
-            _ => None,
-        });
+    let bedrock_port = server.get("bedrock_port").and_then(|v| match v {
+        Value::Number(n) => n.as_u64().map(|n| n as u16),
+        Value::String(s) => s.parse::<u16>().ok(),
+        _ => None,
+    });
 
     // For Bedrock edition with no explicit port, use bedrock_port.
-    if edition == Edition::Bedrock && port.is_none() {
-        if let Some(bp) = bedrock_port {
-            port = Some(bp);
-        }
+    if edition == Edition::Bedrock
+        && port.is_none()
+        && let Some(bp) = bedrock_port
+    {
+        port = Some(bp);
     }
 
     (port, bedrock_port)
@@ -221,7 +218,12 @@ pub fn is_internal_only_host(host: &str) -> bool {
 }
 
 /// Build initial ServerState from a catalog server JSON object.
-pub fn build_state(server: Value, now: f64, startup_spread: u64, probe_interval: u64) -> ServerState {
+pub fn build_state(
+    server: Value,
+    now: f64,
+    startup_spread: u64,
+    probe_interval: u64,
+) -> ServerState {
     let server_id = server
         .get("id")
         .map(|v| match v {

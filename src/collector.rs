@@ -116,10 +116,7 @@ async fn send_batch(
         }
         Ok(resp) => {
             INGEST_FAILURE.inc();
-            warn!(
-                "Failed to forward rows: HTTP {}",
-                resp.status()
-            );
+            warn!("Failed to forward rows: HTTP {}", resp.status());
         }
         Err(e) => {
             INGEST_FAILURE.inc();
@@ -161,8 +158,7 @@ pub async fn run(settings: Settings) {
     let monitoring_headers = build_headers(&settings.monitoring.api_token);
 
     // Shared state.
-    let states: Arc<Mutex<HashMap<String, ServerState>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    let states: Arc<Mutex<HashMap<String, ServerState>>> = Arc::new(Mutex::new(HashMap::new()));
     let scheduler = SchedulerHandle::new();
     let geo_cache = GeoCache::new(
         settings.geo.clone(),
@@ -174,18 +170,13 @@ pub async fn run(settings: Settings) {
 
     // Channels.
     let (work_tx, work_rx) = mpsc::channel::<String>(settings.collector.max_concurrency * 4);
-    let (result_tx, result_rx) =
-        mpsc::channel::<Value>(settings.collector.result_queue_maxsize);
+    let (result_tx, result_rx) = mpsc::channel::<Value>(settings.collector.result_queue_maxsize);
 
     // Fan-out work_rx to multiple workers via a shared receiver.
     let work_rx = Arc::new(tokio::sync::Mutex::new(work_rx));
 
     // Spawn scheduler.
-    tokio::spawn(scheduler_loop(
-        scheduler.clone(),
-        states.clone(),
-        work_tx,
-    ));
+    tokio::spawn(scheduler_loop(scheduler.clone(), states.clone(), work_tx));
 
     // Spawn workers.
     for id in 0..settings.collector.max_concurrency {
@@ -281,11 +272,15 @@ pub async fn run(settings: Settings) {
     }
 
     // Run forever.
-    info!("Collector started with {} workers", settings.collector.max_concurrency);
+    info!(
+        "Collector started with {} workers",
+        settings.collector.max_concurrency
+    );
     std::future::pending::<()>().await;
 }
 
 /// Process a single work item (called from each worker task).
+#[allow(clippy::too_many_arguments)]
 async fn process_work_item(
     _worker_id: usize,
     http: &Client,
@@ -419,10 +414,10 @@ async fn process_work_item(
         build_change_payload(state, &poll_result.payload, status_ok)
     };
 
-    if let Some(payload) = changed_payload {
-        if result_tx.try_send(payload).is_err() {
-            warn!("Result queue full, dropping payload for {server_id}");
-            RESULT_QUEUE_DROPPED.inc();
-        }
+    if let Some(payload) = changed_payload
+        && result_tx.try_send(payload).is_err()
+    {
+        warn!("Result queue full, dropping payload for {server_id}");
+        RESULT_QUEUE_DROPPED.inc();
     }
 }

@@ -12,8 +12,8 @@ use tracing::{info, warn};
 
 use crate::config::Settings;
 use crate::metrics::{
-    SERVERS_TOTAL, SERVER_LIST_REFRESH_DURATION, SERVER_LIST_REFRESH_FAILURE,
-    SERVER_LIST_REFRESH_SUCCESS,
+    SERVER_LIST_REFRESH_DURATION, SERVER_LIST_REFRESH_FAILURE, SERVER_LIST_REFRESH_SUCCESS,
+    SERVERS_TOTAL,
 };
 use crate::models::{
     ServerListResponse, ServerState, build_state, is_plugin_managed, normalize_edition,
@@ -125,7 +125,13 @@ pub async fn refresh_servers_once(
 ) -> bool {
     let started = Instant::now();
 
-    let servers = fetch_servers(http, headers, &settings.server.api, settings.collector.page_size).await;
+    let servers = fetch_servers(
+        http,
+        headers,
+        &settings.server.api,
+        settings.collector.page_size,
+    )
+    .await;
     if servers.is_empty() {
         SERVER_LIST_REFRESH_FAILURE.inc();
         SERVER_LIST_REFRESH_DURATION.set(started.elapsed().as_secs_f64());
@@ -304,45 +310,45 @@ pub fn parse_trigger_content(content: &str) -> Option<Vec<String>> {
         return None;
     }
     // Try JSON.
-    if content.starts_with('{') || content.starts_with('[') {
-        if let Ok(val) = serde_json::from_str::<Value>(content) {
-            if let Some(obj) = val.as_object() {
-                if obj.get("all").and_then(|v| v.as_bool()).unwrap_or(false) {
-                    return None;
-                }
-                let ids = obj
-                    .get("server_ids")
-                    .or_else(|| obj.get("ids"))
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|v| {
-                                let s = match v {
-                                    Value::String(s) => s.trim().to_string(),
-                                    Value::Number(n) => n.to_string(),
-                                    _ => return None,
-                                };
-                                if s.is_empty() { None } else { Some(s) }
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                return Some(ids);
+    if (content.starts_with('{') || content.starts_with('['))
+        && let Ok(val) = serde_json::from_str::<Value>(content)
+    {
+        if let Some(obj) = val.as_object() {
+            if obj.get("all").and_then(|v| v.as_bool()).unwrap_or(false) {
+                return None;
             }
-            if let Some(arr) = val.as_array() {
-                let ids: Vec<String> = arr
-                    .iter()
-                    .filter_map(|v| {
-                        let s = match v {
-                            Value::String(s) => s.trim().to_string(),
-                            Value::Number(n) => n.to_string(),
-                            _ => return None,
-                        };
-                        if s.is_empty() { None } else { Some(s) }
-                    })
-                    .collect();
-                return Some(ids);
-            }
+            let ids = obj
+                .get("server_ids")
+                .or_else(|| obj.get("ids"))
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| {
+                            let s = match v {
+                                Value::String(s) => s.trim().to_string(),
+                                Value::Number(n) => n.to_string(),
+                                _ => return None,
+                            };
+                            if s.is_empty() { None } else { Some(s) }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            return Some(ids);
+        }
+        if let Some(arr) = val.as_array() {
+            let ids: Vec<String> = arr
+                .iter()
+                .filter_map(|v| {
+                    let s = match v {
+                        Value::String(s) => s.trim().to_string(),
+                        Value::Number(n) => n.to_string(),
+                        _ => return None,
+                    };
+                    if s.is_empty() { None } else { Some(s) }
+                })
+                .collect();
+            return Some(ids);
         }
     }
     // Space/comma separated.
@@ -385,18 +391,14 @@ pub async fn redis_force_ping_loop(
         }
     };
 
-    let timeout_secs = settings
-        .collector
-        .force_ping_pop_timeout_seconds
-        .max(0.5) as usize;
+    let timeout_secs = settings.collector.force_ping_pop_timeout_seconds.max(0.5) as usize;
 
     loop {
-        let result: Result<Option<(String, String)>, _> =
-            redis::cmd("BLPOP")
-                .arg(&queue_key)
-                .arg(timeout_secs)
-                .query_async(&mut conn)
-                .await;
+        let result: Result<Option<(String, String)>, _> = redis::cmd("BLPOP")
+            .arg(&queue_key)
+            .arg(timeout_secs)
+            .query_async(&mut conn)
+            .await;
 
         match result {
             Ok(Some((_key, target))) => {

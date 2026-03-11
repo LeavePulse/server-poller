@@ -109,11 +109,11 @@ impl SchedulerHandle {
                     // Try to pop — must re-check since another task may have added
                     // an earlier entry while we waited.
                     let mut lock = self.inner.lock().await;
-                    if let Some(top) = lock.heap.peek() {
-                        if top.due <= self.now() {
-                            let entry = lock.heap.pop().unwrap();
-                            return (entry.key, entry.due);
-                        }
+                    if let Some(top) = lock.heap.peek()
+                        && top.due <= self.now()
+                    {
+                        let entry = lock.heap.pop().unwrap();
+                        return (entry.key, entry.due);
                     }
                     // Something changed, loop again.
                 }

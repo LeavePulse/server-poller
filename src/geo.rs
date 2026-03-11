@@ -74,14 +74,14 @@ impl GeoCache {
         // Check cache.
         {
             let cache = self.dns_entries.read().await;
-            if let Some(entry) = cache.get(&cache_key) {
-                if Instant::now() < entry.expires_at {
-                    return if entry.ip.is_empty() {
-                        None
-                    } else {
-                        Some(entry.ip.clone())
-                    };
-                }
+            if let Some(entry) = cache.get(&cache_key)
+                && Instant::now() < entry.expires_at
+            {
+                return if entry.ip.is_empty() {
+                    None
+                } else {
+                    Some(entry.ip.clone())
+                };
             }
         }
 
@@ -92,15 +92,15 @@ impl GeoCache {
         // Double-check after acquiring permit (another task may have resolved it).
         {
             let cache = self.dns_entries.read().await;
-            if let Some(entry) = cache.get(&cache_key) {
-                if Instant::now() < entry.expires_at {
-                    GEO_REFRESH_INFLIGHT.dec();
-                    return if entry.ip.is_empty() {
-                        None
-                    } else {
-                        Some(entry.ip.clone())
-                    };
-                }
+            if let Some(entry) = cache.get(&cache_key)
+                && Instant::now() < entry.expires_at
+            {
+                GEO_REFRESH_INFLIGHT.dec();
+                return if entry.ip.is_empty() {
+                    None
+                } else {
+                    Some(entry.ip.clone())
+                };
             }
         }
 
@@ -136,11 +136,7 @@ impl GeoCache {
             },
         );
 
-        if ip.is_empty() {
-            None
-        } else {
-            Some(ip)
-        }
+        if ip.is_empty() { None } else { Some(ip) }
     }
 
     /// Fetch geolocation for a host, with caching and jitter.
@@ -156,16 +152,14 @@ impl GeoCache {
         // Check cache.
         {
             let cache = self.geo_entries.read().await;
-            if let Some(entry) = cache.get(&cache_key) {
-                if Instant::now() < entry.expires_at {
-                    return (entry.country.clone(), entry.country_code.clone());
-                }
+            if let Some(entry) = cache.get(&cache_key)
+                && Instant::now() < entry.expires_at
+            {
+                return (entry.country.clone(), entry.country_code.clone());
             }
         }
 
-        let result = self
-            .fetch_geo_uncached(http, host, port, edition)
-            .await;
+        let result = self.fetch_geo_uncached(http, host, port, edition).await;
 
         let is_empty = result.0.is_empty() && result.1.is_empty();
         let ttl = if is_empty {
@@ -200,9 +194,7 @@ impl GeoCache {
             None => return (String::new(), String::new()),
         };
 
-        let url = format!(
-            "http://ip-api.com/json/{resolved_ip}?fields=status,country,countryCode"
-        );
+        let url = format!("http://ip-api.com/json/{resolved_ip}?fields=status,country,countryCode");
 
         let timeout = Duration::from_secs_f64(self.lookup_timeout_seconds);
         let resp = match http.get(&url).timeout(timeout).send().await {

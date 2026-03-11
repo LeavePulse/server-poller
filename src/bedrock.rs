@@ -20,8 +20,7 @@ use tracing::debug;
 
 /// RakNet offline message magic bytes.
 const RAKNET_MAGIC: [u8; 16] = [
-    0x00, 0xff, 0xff, 0x00, 0xfe, 0xfe, 0xfe, 0xfe, 0xfd, 0xfd, 0xfd, 0xfd, 0x12, 0x34, 0x56,
-    0x78,
+    0x00, 0xff, 0xff, 0x00, 0xfe, 0xfe, 0xfe, 0xfe, 0xfd, 0xfd, 0xfd, 0xfd, 0x12, 0x34, 0x56, 0x78,
 ];
 
 const UNCONNECTED_PING_ID: u8 = 0x01;
@@ -72,8 +71,7 @@ fn parse_pong(data: &[u8]) -> Option<BedrockStatus> {
     }
 
     // Skip: id(1) + time(8) + guid(8) + magic(16) = 33 bytes.
-    let string_len =
-        u16::from_be_bytes([data[33], data[34]]) as usize;
+    let string_len = u16::from_be_bytes([data[33], data[34]]) as usize;
     if data.len() < 35 + string_len {
         return None;
     }
@@ -107,10 +105,7 @@ pub async fn ping_bedrock(host: &str, port: u16, timeout: Duration) -> Option<Be
     let result = tokio::time::timeout(timeout, async {
         // Bind to any available local port.
         let socket = UdpSocket::bind("0.0.0.0:0").await.ok()?;
-        socket
-            .connect(format!("{host}:{port}"))
-            .await
-            .ok()?;
+        socket.connect(format!("{host}:{port}")).await.ok()?;
 
         let packet = build_ping_packet();
         socket.send(&packet).await.ok()?;

@@ -14,8 +14,7 @@ use crate::bedrock;
 use crate::config::Settings;
 use crate::geo::GeoCache;
 use crate::metrics::{
-    BEDROCK_PROBE_DURATION, BEDROCK_PROBE_FAILURE, BEDROCK_PROBE_INFLIGHT,
-    BEDROCK_PROBE_SUCCESS,
+    BEDROCK_PROBE_DURATION, BEDROCK_PROBE_FAILURE, BEDROCK_PROBE_INFLIGHT, BEDROCK_PROBE_SUCCESS,
 };
 use crate::models::{Edition, ServerState, schedule_next_bedrock_probe};
 
@@ -60,12 +59,37 @@ pub async fn poll_server(
     };
 
     match state.edition {
-        Edition::Bedrock => poll_bedrock(state, &host, port, timeout, &collected_at, &country, &country_code, fail_payload).await,
-        Edition::Java => poll_java(state, &host, port, timeout, &collected_at, &country, &country_code, fail_payload).await,
+        Edition::Bedrock => {
+            poll_bedrock(
+                state,
+                &host,
+                port,
+                timeout,
+                &collected_at,
+                &country,
+                &country_code,
+                fail_payload,
+            )
+            .await
+        }
+        Edition::Java => {
+            poll_java(
+                state,
+                &host,
+                port,
+                timeout,
+                &collected_at,
+                &country,
+                &country_code,
+                fail_payload,
+            )
+            .await
+        }
     }
 }
 
 /// Poll a Java edition server via SLP (Server List Ping over TCP).
+#[allow(clippy::too_many_arguments)]
 async fn poll_java(
     state: &ServerState,
     host: &str,
@@ -167,6 +191,7 @@ async fn poll_java(
 }
 
 /// Poll a Bedrock edition server via RakNet Unconnected Ping (UDP).
+#[allow(clippy::too_many_arguments)]
 async fn poll_bedrock(
     state: &ServerState,
     host: &str,
@@ -242,7 +267,13 @@ pub async fn maybe_update_favicon(
     }
     let url = format!("{server_api}/internal/servers/{}/favicon", state.server_id);
     let body = json!({"data_url": favicon_str, "hash": hash});
-    match http.post(&url).headers(hdrs.clone()).json(&body).send().await {
+    match http
+        .post(&url)
+        .headers(hdrs.clone())
+        .json(&body)
+        .send()
+        .await
+    {
         Ok(resp) if resp.status().is_success() => {
             state.last_favicon_hash = Some(hash);
             debug!("Updated favicon for {}", state.server_id);
@@ -297,7 +328,13 @@ pub async fn maybe_probe_bedrock(
                 settings.server.api, state.server_id
             );
             let body = json!({"game_edition": "java_bedrock"});
-            match http.patch(&url).headers(hdrs.clone()).json(&body).send().await {
+            match http
+                .patch(&url)
+                .headers(hdrs.clone())
+                .json(&body)
+                .send()
+                .await
+            {
                 Ok(resp) if resp.status().is_success() => {
                     if let Some(obj) = state.server.as_object_mut() {
                         obj.insert(

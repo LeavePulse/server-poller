@@ -10,9 +10,8 @@ use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use prometheus::{
     Encoder, Gauge, GaugeVec, Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, Opts,
-    TextEncoder, register_gauge, register_gauge_vec,
-    register_histogram, register_int_counter, register_int_counter_vec,
-    register_int_gauge,
+    TextEncoder, register_gauge, register_gauge_vec, register_histogram, register_int_counter,
+    register_int_counter_vec, register_int_gauge,
 };
 use tokio::net::TcpListener;
 use tracing::{error, info};
@@ -127,11 +126,15 @@ pub static INGEST_ROWS: LazyLock<IntCounter> = LazyLock::new(|| {
 });
 
 pub static INGEST_BATCH_SIZE_HISTOGRAM: LazyLock<Histogram> = LazyLock::new(|| {
-    register_histogram!(HistogramOpts::new(
-        "unverified_collector_ingest_batch_size",
-        "Batch sizes posted to monitoring-service."
+    register_histogram!(
+        HistogramOpts::new(
+            "unverified_collector_ingest_batch_size",
+            "Batch sizes posted to monitoring-service."
+        )
+        .buckets(vec![
+            1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 200.0, 500.0, 1000.0
+        ])
     )
-    .buckets(vec![1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 200.0, 500.0, 1000.0]))
     .unwrap()
 });
 
@@ -156,11 +159,7 @@ pub static SERVERS_TOTAL: LazyLock<IntGauge> = LazyLock::new(|| {
 });
 
 pub static WORK_QUEUE_SIZE: LazyLock<IntGauge> = LazyLock::new(|| {
-    register_int_gauge!(
-        "unverified_collector_work_queue_size",
-        "Work queue size."
-    )
-    .unwrap()
+    register_int_gauge!("unverified_collector_work_queue_size", "Work queue size.").unwrap()
 });
 
 pub static RESULT_QUEUE_SIZE: LazyLock<IntGauge> = LazyLock::new(|| {
@@ -172,11 +171,7 @@ pub static RESULT_QUEUE_SIZE: LazyLock<IntGauge> = LazyLock::new(|| {
 });
 
 pub static GEO_CACHE_SIZE: LazyLock<IntGauge> = LazyLock::new(|| {
-    register_int_gauge!(
-        "unverified_collector_geo_cache_size",
-        "Geo cache size."
-    )
-    .unwrap()
+    register_int_gauge!("unverified_collector_geo_cache_size", "Geo cache size.").unwrap()
 });
 
 pub static GEO_REFRESH_INFLIGHT: LazyLock<IntGauge> = LazyLock::new(|| {
