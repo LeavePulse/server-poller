@@ -33,7 +33,7 @@ jobs:
         id: image
         run: |
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          echo "name=${{ env.REGISTRY }}/$OWNER/leavepulse-unverified-collector" >> "$GITHUB_OUTPUT"
+          echo "name=${{ env.REGISTRY }}/$OWNER/leavepulse-unverified-collector-rs" >> "$GITHUB_OUTPUT"
 
       - name: Docker meta
         id: meta
