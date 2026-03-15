@@ -42,6 +42,7 @@ pub struct CollectorSettings {
     pub initial_failure_slowdown_multiplier: f64,
     pub initial_failure_max_interval_seconds: u64,
     pub plugin_compare_interval_seconds: u64,
+    pub heartbeat_interval_seconds: u64,
 }
 
 /// Geo lookup cache settings.
@@ -262,6 +263,10 @@ impl Settings {
                     env_u64("PLUGIN_COMPARE_INTERVAL_SECONDS", 1800),
                 )
                 .max(60),
+                heartbeat_interval_seconds: env_u64(
+                    "COLLECTOR_HEARTBEAT_INTERVAL_SECONDS",
+                    env_u64("HEARTBEAT_INTERVAL_SECONDS", 300),
+                ),
             },
 
             geo: GeoSettings {

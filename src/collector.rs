@@ -404,7 +404,13 @@ async fn process_work_item(
             return;
         }
 
-        build_change_payload(state, &poll_result.payload, status_ok)
+        build_change_payload(
+            state,
+            &poll_result.payload,
+            status_ok,
+            scheduler.now(),
+            settings.collector.heartbeat_interval_seconds as f64,
+        )
     };
 
     if let Some(payload) = changed_payload

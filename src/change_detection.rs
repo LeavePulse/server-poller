@@ -37,10 +37,17 @@ fn players_hash(players: &[String]) -> Option<String> {
 
 /// Compare current poll payload against last emitted state.
 /// Returns the enriched payload with event_type, or None if unchanged.
+///
+/// When `heartbeat_interval` is non-zero and no change is detected, a
+/// `"heartbeat"` event is emitted if at least `heartbeat_interval` seconds
+/// have elapsed since the last emission. This prevents gaps in ClickHouse
+/// time-series data when server state is stable.
 pub fn build_change_payload(
     state: &mut ServerState,
     payload: &Value,
     status_ok: bool,
+    now: f64,
+    heartbeat_interval: f64,
 ) -> Option<Value> {
     let current_up = status_ok;
     let current_online: Option<i64> = if !current_up {
@@ -115,8 +122,19 @@ pub fn build_change_payload(
         "online_changed"
     } else if changed_meta || changed_players {
         "state_updated"
+    } else if heartbeat_interval > 0.0 {
+        // No change — check heartbeat.
+        let elapsed = match state.last_emitted_at {
+            Some(t) => now - t,
+            None => heartbeat_interval, // force emit if never emitted
+        };
+        if elapsed >= heartbeat_interval {
+            "heartbeat"
+        } else {
+            return None;
+        }
     } else {
-        // No change.
+        // No change, heartbeat disabled.
         return None;
     };
 
@@ -155,6 +173,7 @@ pub fn build_change_payload(
     state.last_emitted_country = Some(current_country);
     state.last_emitted_country_code = Some(current_country_code);
     state.last_emitted_players_hash = phash;
+    state.last_emitted_at = Some(now);
 
     Some(out)
 }
@@ -190,6 +209,7 @@ mod tests {
             last_emitted_country: None,
             last_emitted_country_code: None,
             last_emitted_players_hash: None,
+            last_emitted_at: None,
         }
     }
 
@@ -207,7 +227,7 @@ mod tests {
             "country_code": "US",
             "extra": {},
         });
-        let result = build_change_payload(&mut state, &payload, true).unwrap();
+        let result = build_change_payload(&mut state, &payload, true, 1000.0, 0.0).unwrap();
         assert_eq!(result["event_type"], "state_full");
         assert!(state.has_emitted_state);
         assert_eq!(state.last_emitted_up, Some(true));
@@ -228,9 +248,9 @@ mod tests {
             "extra": {},
         });
         // First call → state_full.
-        build_change_payload(&mut state, &payload, true);
+        build_change_payload(&mut state, &payload, true, 1000.0, 0.0);
         // Second call with same data → None.
-        let result = build_change_payload(&mut state, &payload, true);
+        let result = build_change_payload(&mut state, &payload, true, 1001.0, 0.0);
         assert!(result.is_none());
     }
 
@@ -247,7 +267,7 @@ mod tests {
             "country_code": "",
             "extra": {},
         });
-        build_change_payload(&mut state, &up_payload, true);
+        build_change_payload(&mut state, &up_payload, true, 1000.0, 0.0);
 
         let down_payload = json!({
             "collected_at": "t2",
@@ -258,7 +278,7 @@ mod tests {
             "country": "",
             "country_code": "",
         });
-        let result = build_change_payload(&mut state, &down_payload, false).unwrap();
+        let result = build_change_payload(&mut state, &down_payload, false, 1001.0, 0.0).unwrap();
         assert_eq!(result["event_type"], "server_down");
         assert_eq!(result["online"], 0);
         // Should preserve last known metadata.
@@ -276,7 +296,7 @@ mod tests {
             "country": "",
             "country_code": "",
         });
-        build_change_payload(&mut state, &down_payload, false);
+        build_change_payload(&mut state, &down_payload, false, 1000.0, 0.0);
 
         // Second: server comes back up.
         let up_payload = json!({
@@ -289,7 +309,7 @@ mod tests {
             "country_code": "",
             "extra": {},
         });
-        let result = build_change_payload(&mut state, &up_payload, true).unwrap();
+        let result = build_change_payload(&mut state, &up_payload, true, 1001.0, 0.0).unwrap();
         assert_eq!(result["event_type"], "server_up");
     }
 
@@ -306,7 +326,7 @@ mod tests {
             "country_code": "",
             "extra": {},
         });
-        build_change_payload(&mut state, &payload1, true);
+        build_change_payload(&mut state, &payload1, true, 1000.0, 0.0);
 
         let payload2 = json!({
             "collected_at": "t2",
@@ -318,7 +338,7 @@ mod tests {
             "country_code": "",
             "extra": {},
         });
-        let result = build_change_payload(&mut state, &payload2, true).unwrap();
+        let result = build_change_payload(&mut state, &payload2, true, 1001.0, 0.0).unwrap();
         assert_eq!(result["event_type"], "online_changed");
     }
 
@@ -335,7 +355,7 @@ mod tests {
             "country_code": "",
             "extra": {"players": ["Alice", "Bob"]},
         });
-        build_change_payload(&mut state, &payload1, true);
+        build_change_payload(&mut state, &payload1, true, 1000.0, 0.0);
 
         let payload2 = json!({
             "collected_at": "t2",
@@ -347,8 +367,57 @@ mod tests {
             "country_code": "",
             "extra": {"players": ["Alice", "Charlie"]},
         });
-        let result = build_change_payload(&mut state, &payload2, true).unwrap();
+        let result = build_change_payload(&mut state, &payload2, true, 1001.0, 0.0).unwrap();
         assert_eq!(result["event_type"], "state_updated");
+    }
+
+    #[test]
+    fn test_heartbeat_emits_when_interval_elapsed() {
+        let mut state = make_state();
+        let payload = json!({
+            "collected_at": "2025-01-01T00:00:00",
+            "online": 10,
+            "max_players": 100,
+            "version": "1.20.4",
+            "motd": "Hello",
+            "country": "US",
+            "country_code": "US",
+            "extra": {},
+        });
+        // First call → state_full at t=1000.
+        let result = build_change_payload(&mut state, &payload, true, 1000.0, 300.0).unwrap();
+        assert_eq!(result["event_type"], "state_full");
+        assert_eq!(state.last_emitted_at, Some(1000.0));
+
+        // Second call at t=1100, only 100s passed — no emit.
+        let result = build_change_payload(&mut state, &payload, true, 1100.0, 300.0);
+        assert!(result.is_none());
+        // last_emitted_at unchanged.
+        assert_eq!(state.last_emitted_at, Some(1000.0));
+
+        // Third call at t=1300, 300s elapsed — heartbeat.
+        let result = build_change_payload(&mut state, &payload, true, 1300.0, 300.0).unwrap();
+        assert_eq!(result["event_type"], "heartbeat");
+        assert_eq!(state.last_emitted_at, Some(1300.0));
+    }
+
+    #[test]
+    fn test_heartbeat_disabled_when_zero() {
+        let mut state = make_state();
+        let payload = json!({
+            "collected_at": "2025-01-01T00:00:00",
+            "online": 10,
+            "max_players": 100,
+            "version": "1.20.4",
+            "motd": "Hello",
+            "country": "US",
+            "country_code": "US",
+            "extra": {},
+        });
+        build_change_payload(&mut state, &payload, true, 1000.0, 0.0);
+        // With heartbeat_interval=0, no heartbeat even after long time.
+        let result = build_change_payload(&mut state, &payload, true, 9999.0, 0.0);
+        assert!(result.is_none());
     }
 
     #[test]
@@ -365,7 +434,7 @@ mod tests {
             "country_code": "",
             "extra": {},
         });
-        let result = build_change_payload(&mut state, &payload, true).unwrap();
+        let result = build_change_payload(&mut state, &payload, true, 1000.0, 0.0).unwrap();
         assert_eq!(result["extra"]["compare_probe"], true);
     }
 }

@@ -35,6 +35,7 @@ pub struct ServerState {
     pub last_emitted_country: Option<String>,
     pub last_emitted_country_code: Option<String>,
     pub last_emitted_players_hash: Option<String>,
+    pub last_emitted_at: Option<f64>,
 }
 
 impl ServerState {
@@ -49,6 +50,7 @@ impl ServerState {
         self.last_emitted_country = None;
         self.last_emitted_country_code = None;
         self.last_emitted_players_hash = None;
+        self.last_emitted_at = None;
     }
 }
 
@@ -275,6 +277,7 @@ pub fn build_state(
         last_emitted_country: None,
         last_emitted_country_code: None,
         last_emitted_players_hash: None,
+        last_emitted_at: None,
     }
 }
 
