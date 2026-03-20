@@ -22,6 +22,26 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Ensure native build toolchain
+        run: |
+          if command -v cc >/dev/null 2>&1 && command -v c++ >/dev/null 2>&1; then
+            echo "Native toolchain already available"
+            exit 0
+          fi
+
+          if ! command -v apt-get >/dev/null 2>&1; then
+            echo "apt-get is unavailable on this runner; cannot install build toolchain" >&2
+            exit 1
+          fi
+
+          if command -v sudo >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y build-essential pkg-config libssl-dev
+          else
+            apt-get update
+            apt-get install -y build-essential pkg-config libssl-dev
+          fi
+
       - name: Cache cargo registry & build
         uses: actions/cache@v4
         with:
