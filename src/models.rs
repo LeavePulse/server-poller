@@ -2,6 +2,7 @@
 
 use std::net::IpAddr;
 
+use chrono::{DateTime, Utc};
 use rand::Rng;
 use serde::Deserialize;
 use serde_json::Value;
@@ -22,6 +23,7 @@ pub struct ServerState {
     pub next_bedrock_probe: Option<f64>,
     pub next_query_attempt: f64,
     pub plugin_managed: bool,
+    pub plugin_fallback_mode: bool,
     pub last_favicon_hash: Option<String>,
     pub has_succeeded: bool,
     pub initial_failures: u32,
@@ -180,6 +182,33 @@ pub fn is_plugin_managed(server: &Value) -> bool {
     source == "plugin"
 }
 
+fn parse_plugin_last_seen_at(server: &Value) -> Option<DateTime<Utc>> {
+    let raw = server.get("verified_plugin_last_seen_at")?.as_str()?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    DateTime::parse_from_rfc3339(raw)
+        .ok()
+        .map(|value| value.with_timezone(&Utc))
+}
+
+pub fn is_plugin_fallback_mode(
+    server: &Value,
+    stale_after_seconds: u64,
+    now: DateTime<Utc>,
+) -> bool {
+    if !is_plugin_managed(server) {
+        return false;
+    }
+
+    let Some(last_seen_at) = parse_plugin_last_seen_at(server) else {
+        return true;
+    };
+
+    let stale_after = chrono::TimeDelta::seconds(stale_after_seconds.max(60) as i64);
+    now - last_seen_at >= stale_after
+}
+
 pub fn wants_bedrock_probe(server: &Value, probe_interval: u64) -> bool {
     if probe_interval == 0 {
         return false;
@@ -225,6 +254,7 @@ pub fn build_state(
     now: f64,
     startup_spread: u64,
     probe_interval: u64,
+    plugin_fallback_stale_seconds: u64,
 ) -> ServerState {
     let server_id = server
         .get("id")
@@ -251,6 +281,8 @@ pub fn build_state(
     let next_due = now + rand::thread_rng().gen_range(0.0..spread);
     let next_bedrock_probe = seed_bedrock_probe(&server, now, probe_interval);
     let plugin_managed = is_plugin_managed(&server);
+    let plugin_fallback_mode =
+        is_plugin_fallback_mode(&server, plugin_fallback_stale_seconds, Utc::now());
 
     ServerState {
         key,
@@ -264,6 +296,7 @@ pub fn build_state(
         next_bedrock_probe,
         next_query_attempt: now,
         plugin_managed,
+        plugin_fallback_mode,
         last_favicon_hash: None,
         has_succeeded: false,
         initial_failures: 0,
@@ -353,6 +386,41 @@ mod tests {
     }
 
     #[test]
+    fn test_plugin_fallback_mode_enables_when_plugin_signal_is_missing() {
+        let server = serde_json::json!({
+            "is_verified": true,
+            "verification_source": "plugin",
+            "verified_plugin_last_seen_at": null
+        });
+
+        assert!(is_plugin_fallback_mode(&server, 300, Utc::now()));
+    }
+
+    #[test]
+    fn test_plugin_fallback_mode_disables_when_plugin_signal_is_recent() {
+        let now = Utc::now();
+        let server = serde_json::json!({
+            "is_verified": true,
+            "verification_source": "plugin",
+            "verified_plugin_last_seen_at": (now - chrono::TimeDelta::seconds(120)).to_rfc3339()
+        });
+
+        assert!(!is_plugin_fallback_mode(&server, 300, now));
+    }
+
+    #[test]
+    fn test_plugin_fallback_mode_enables_when_plugin_signal_is_stale() {
+        let now = Utc::now();
+        let server = serde_json::json!({
+            "is_verified": true,
+            "verification_source": "plugin",
+            "verified_plugin_last_seen_at": (now - chrono::TimeDelta::minutes(15)).to_rfc3339()
+        });
+
+        assert!(is_plugin_fallback_mode(&server, 300, now));
+    }
+
+    #[test]
     fn test_is_internal_only_host() {
         assert!(is_internal_only_host("internal-server.local"));
         assert!(is_internal_only_host("INTERNAL-server.local"));
@@ -410,7 +478,7 @@ mod tests {
             "ip_or_domain": "mc.example.com:25566",
             "game_edition": "java",
         });
-        let state = build_state(server, 100.0, 60, 3600);
+        let state = build_state(server, 100.0, 60, 3600, 300);
         assert_eq!(state.server_id, "12345");
         assert_eq!(state.host, "mc.example.com");
         assert_eq!(state.port, Some(25566));

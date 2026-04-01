@@ -146,8 +146,11 @@ pub fn build_change_payload(
         "poll_status".to_string(),
         json!(if current_up { "ok" } else { "failed" }),
     );
-    if state.plugin_managed {
+    if state.plugin_managed && !state.plugin_fallback_mode {
         out_extra.insert("compare_probe".to_string(), json!(true));
+    }
+    if state.plugin_fallback_mode {
+        out_extra.insert("plugin_fallback".to_string(), json!(true));
     }
 
     let out = json!({
@@ -196,6 +199,7 @@ mod tests {
             next_bedrock_probe: None,
             next_query_attempt: 0.0,
             plugin_managed: false,
+            plugin_fallback_mode: false,
             last_favicon_hash: None,
             has_succeeded: false,
             initial_failures: 0,
@@ -436,5 +440,25 @@ mod tests {
         });
         let result = build_change_payload(&mut state, &payload, true, 1000.0, 0.0).unwrap();
         assert_eq!(result["extra"]["compare_probe"], true);
+    }
+
+    #[test]
+    fn test_plugin_fallback_does_not_add_compare_probe() {
+        let mut state = make_state();
+        state.plugin_managed = true;
+        state.plugin_fallback_mode = true;
+        let payload = json!({
+            "collected_at": "t1",
+            "online": 5,
+            "max_players": 20,
+            "version": "1.20",
+            "motd": "Hi",
+            "country": "",
+            "country_code": "",
+            "extra": {},
+        });
+        let result = build_change_payload(&mut state, &payload, true, 1000.0, 0.0).unwrap();
+        assert_eq!(result["extra"]["plugin_fallback"], true);
+        assert!(result["extra"].get("compare_probe").is_none());
     }
 }

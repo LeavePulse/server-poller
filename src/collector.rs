@@ -300,7 +300,7 @@ async fn process_work_item(
     let max_slow_interval = settings.collector.initial_failure_max_interval_seconds as f64;
 
     // Read state snapshot for polling.
-    let (host, port, edition, plugin_managed, server_id) = {
+    let (host, port, edition, plugin_managed, plugin_fallback_mode, server_id) = {
         let map = states.lock().await;
         match map.get(&key) {
             Some(s) => (
@@ -308,6 +308,7 @@ async fn process_work_item(
                 s.port,
                 s.edition,
                 s.plugin_managed,
+                s.plugin_fallback_mode,
                 s.server_id.clone(),
             ),
             None => return,
@@ -378,7 +379,7 @@ async fn process_work_item(
         }
 
         // Next interval.
-        let interval = if plugin_managed {
+        let interval = if plugin_managed && !plugin_fallback_mode {
             plugin_interval
         } else {
             let mut iv = if status_ok {
@@ -400,7 +401,7 @@ async fn process_work_item(
         state.next_due = scheduler.now() + (interval + jitter).max(1.0);
         scheduler.schedule(key.clone(), state.next_due);
 
-        if plugin_managed && !status_ok {
+        if plugin_managed && !plugin_fallback_mode && !status_ok {
             return;
         }
 

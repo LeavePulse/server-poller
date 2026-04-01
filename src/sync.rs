@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use chrono::Utc;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -16,8 +17,8 @@ use crate::metrics::{
     SERVERS_TOTAL,
 };
 use crate::models::{
-    ServerListResponse, ServerState, build_state, is_plugin_managed, normalize_edition,
-    parse_address, resolve_state_ports, seed_bedrock_probe, wants_bedrock_probe,
+    ServerListResponse, ServerState, build_state, is_plugin_fallback_mode, is_plugin_managed,
+    normalize_edition, parse_address, resolve_state_ports, seed_bedrock_probe, wants_bedrock_probe,
 };
 use crate::scheduler::SchedulerHandle;
 
@@ -185,6 +186,16 @@ pub async fn refresh_servers_once(
             }
             state.server = server.clone();
             state.plugin_managed = is_plugin_managed(server);
+            let previous_fallback_mode = state.plugin_fallback_mode;
+            state.plugin_fallback_mode = is_plugin_fallback_mode(
+                server,
+                settings.collector.plugin_fallback_stale_seconds,
+                Utc::now(),
+            );
+            if state.plugin_fallback_mode && !previous_fallback_mode {
+                state.next_due = now;
+                scheduler.schedule(key.clone(), state.next_due);
+            }
             if wants_bedrock_probe(server, settings.collector.bedrock_probe_interval_seconds) {
                 if state.next_bedrock_probe.is_none() {
                     state.next_bedrock_probe = seed_bedrock_probe(
@@ -203,6 +214,7 @@ pub async fn refresh_servers_once(
                 now,
                 settings.collector.startup_spread_seconds,
                 settings.collector.bedrock_probe_interval_seconds,
+                settings.collector.plugin_fallback_stale_seconds,
             );
             let next_due = state.next_due;
             let state_key = state.key.clone();
@@ -430,6 +442,7 @@ pub async fn redis_force_ping_loop(
                             now,
                             settings.collector.startup_spread_seconds,
                             settings.collector.bedrock_probe_interval_seconds,
+                            settings.collector.plugin_fallback_stale_seconds,
                         );
                         let state_key = state.key.clone();
                         let mut map = states.lock().await;

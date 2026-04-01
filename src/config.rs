@@ -42,6 +42,7 @@ pub struct CollectorSettings {
     pub initial_failure_slowdown_multiplier: f64,
     pub initial_failure_max_interval_seconds: u64,
     pub plugin_compare_interval_seconds: u64,
+    pub plugin_fallback_stale_seconds: u64,
     pub heartbeat_interval_seconds: u64,
 }
 
@@ -261,6 +262,11 @@ impl Settings {
                 plugin_compare_interval_seconds: env_u64(
                     "COLLECTOR_PLUGIN_COMPARE_INTERVAL_SECONDS",
                     env_u64("PLUGIN_COMPARE_INTERVAL_SECONDS", 1800),
+                )
+                .max(60),
+                plugin_fallback_stale_seconds: env_u64(
+                    "COLLECTOR_PLUGIN_FALLBACK_STALE_SECONDS",
+                    env_u64("PLUGIN_FALLBACK_STALE_SECONDS", 300),
                 )
                 .max(60),
                 heartbeat_interval_seconds: env_u64(
