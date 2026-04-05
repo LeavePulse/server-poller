@@ -26,7 +26,7 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/* && \
     adduser --disabled-password --gecos '' appuser
 
-COPY --from=builder /app/target/release/unverified-collector /usr/local/bin/unverified-collector
+COPY --from=builder /app/target/release/server-poller /usr/local/bin/server-poller
 
 USER appuser
 
@@ -34,4 +34,4 @@ EXPOSE 9100
 
 HEALTHCHECK CMD curl --fail http://localhost:${PROMETHEUS_PORT:-9100}/metrics || exit 1
 
-CMD ["unverified-collector"]
+CMD ["server-poller"]

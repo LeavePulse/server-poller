@@ -29,7 +29,7 @@ async fn main() {
         workers = settings.collector.max_concurrency,
         online_interval = settings.collector.online_interval_seconds,
         offline_interval = settings.collector.offline_interval_seconds,
-        "Starting unverified-collector-rs"
+        "Starting server-poller"
     );
 
     // Initialize metrics (force lazy statics).

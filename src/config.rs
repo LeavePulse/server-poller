@@ -169,7 +169,7 @@ impl Settings {
             env_str_opt("SERVER_API_TOKEN").or_else(|| env_str_opt("CORE_API_TOKEN"));
 
         Settings {
-            service_name: env_str("SERVICE_NAME", "unverified-collector"),
+            service_name: env_str("SERVICE_NAME", "server-poller"),
             log_level: env_str("LOG_LEVEL", "info"),
 
             server: ServerApiSettings {
@@ -233,7 +233,7 @@ impl Settings {
                 ),
                 trigger_file_path: env_str(
                     "COLLECTOR_TRIGGER_FILE_PATH",
-                    &env_str("TRIGGER_FILE_PATH", "/tmp/unverified-collector-trigger"),
+                    &env_str("TRIGGER_FILE_PATH", "/tmp/server-poller-trigger"),
                 ),
                 trigger_poll_seconds: env_f64(
                     "COLLECTOR_TRIGGER_POLL_SECONDS",

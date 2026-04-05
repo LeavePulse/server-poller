@@ -1,0 +1,20 @@
+services:
+  server-poller:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: server-poller
+    restart: always
+    environment:
+      SERVER_API: ${SERVER_API:-http://server-service:8201}
+      MONITORING_API: ${MONITORING_API:-http://monitoring-service:8200}
+      REDIS_ENABLED: ${REDIS_ENABLED:-false}
+      REDIS_URL: ${REDIS_URL:-redis://auth-redis:6379/0}
+      PROMETHEUS_HOST: ${PROMETHEUS_HOST:-0.0.0.0}
+      PROMETHEUS_PORT: ${PROMETHEUS_PORT:-9100}
+    networks:
+      - shared
+
+networks:
+  shared:
+    driver: bridge
