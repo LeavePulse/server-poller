@@ -28,6 +28,9 @@ RUN apt-get update && \
 
 COPY --from=builder /app/target/release/server-poller /usr/local/bin/server-poller
 
+RUN mkdir -p /app/data/buffer && chown -R appuser:appuser /app/data
+WORKDIR /app
+
 USER appuser
 
 EXPOSE 9100
