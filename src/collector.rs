@@ -54,6 +54,7 @@ async fn scheduler_loop(
 }
 
 /// Batch results and POST them to monitoring-service.
+/// Failed batches are persisted to a WAL buffer on disk and drained on recovery.
 async fn ingest_loop(
     http: Client,
     headers: Option<reqwest::header::HeaderMap>,
@@ -64,6 +65,57 @@ async fn ingest_loop(
     let flush_interval = Duration::from_secs_f64(settings.collector.ingest_flush_seconds);
     let monitoring_api = &settings.monitoring.api;
 
+    let mut wal = match crate::wal::WalBuffer::open(
+        std::path::PathBuf::from(&settings.collector.buffer_dir),
+        settings.collector.buffer_max_bytes,
+        settings.collector.buffer_segment_max_bytes,
+    ) {
+        Ok(w) => w,
+        Err(e) => {
+            warn!("Failed to open WAL buffer: {e} — running without disk buffer");
+            // Fall back to old behaviour with a dummy WAL that never has pending data.
+            // We still enter the loop; send_batch failures will just be logged.
+            run_ingest_loop_no_wal(http, headers, result_rx, batch_size, flush_interval, monitoring_api).await;
+            return;
+        }
+    };
+
+    let mut batch: Vec<Value> = Vec::with_capacity(batch_size);
+    let mut deadline = tokio::time::Instant::now() + flush_interval;
+
+    loop {
+        tokio::select! {
+            item = result_rx.recv() => {
+                match item {
+                    Some(payload) => {
+                        batch.push(payload);
+                        if batch.len() >= batch_size {
+                            flush_batch(&http, &headers, &mut batch, monitoring_api, &mut wal, batch_size).await;
+                            deadline = tokio::time::Instant::now() + flush_interval;
+                        }
+                    }
+                    None => break,
+                }
+            }
+            _ = tokio::time::sleep_until(deadline) => {
+                if !batch.is_empty() {
+                    flush_batch(&http, &headers, &mut batch, monitoring_api, &mut wal, batch_size).await;
+                }
+                deadline = tokio::time::Instant::now() + flush_interval;
+            }
+        }
+    }
+}
+
+/// Fallback ingest loop when WAL cannot be opened (original behaviour).
+async fn run_ingest_loop_no_wal(
+    http: Client,
+    headers: Option<reqwest::header::HeaderMap>,
+    mut result_rx: mpsc::Receiver<Value>,
+    batch_size: usize,
+    flush_interval: Duration,
+    monitoring_api: &str,
+) {
     let mut batch: Vec<Value> = Vec::with_capacity(batch_size);
     let mut deadline = tokio::time::Instant::now() + flush_interval;
 
@@ -93,12 +145,54 @@ async fn ingest_loop(
     }
 }
 
+/// Send a batch and handle WAL write-on-failure / drain-on-success.
+async fn flush_batch(
+    http: &Client,
+    headers: &Option<reqwest::header::HeaderMap>,
+    batch: &mut Vec<Value>,
+    monitoring_api: &str,
+    wal: &mut crate::wal::WalBuffer,
+    drain_max: usize,
+) {
+    let ok = send_batch(http, headers, batch, monitoring_api).await;
+    if ok {
+        batch.clear();
+        // Drain one buffered segment on success.
+        if wal.has_pending() {
+            match wal.read_oldest_batch(drain_max) {
+                Ok(Some((path, items))) => {
+                    if !items.is_empty() {
+                        let drain_ok = send_batch(http, headers, &items, monitoring_api).await;
+                        if drain_ok {
+                            if let Err(e) = wal.delete_segment(&path) {
+                                warn!("Failed to delete drained WAL segment: {e}");
+                            }
+                        }
+                    } else {
+                        // Empty segment (all records corrupted), just remove it.
+                        let _ = wal.delete_segment(&path);
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => warn!("Failed to read WAL segment for drain: {e}"),
+            }
+        }
+    } else {
+        // Write failed batch to WAL for later retry.
+        if let Err(e) = wal.write_batch(batch) {
+            warn!("Failed to write batch to WAL buffer: {e}");
+        }
+        batch.clear();
+    }
+}
+
+/// Send a batch to monitoring-service. Returns `true` on success.
 async fn send_batch(
     http: &Client,
     headers: &Option<reqwest::header::HeaderMap>,
     batch: &[Value],
     monitoring_api: &str,
-) {
+) -> bool {
     let payload = json!({"items": batch});
     let url = format!("{monitoring_api}/monitoring/ingest/unverified");
 
@@ -113,14 +207,17 @@ async fn send_batch(
             INGEST_ROWS.inc_by(batch.len() as u64);
             INGEST_BATCH_SIZE_HISTOGRAM.observe(batch.len() as f64);
             info!("Forwarded {} rows to monitoring-service", batch.len());
+            true
         }
         Ok(resp) => {
             INGEST_FAILURE.inc();
             warn!("Failed to forward rows: HTTP {}", resp.status());
+            false
         }
         Err(e) => {
             INGEST_FAILURE.inc();
             warn!("Failed to forward rows: {e}");
+            false
         }
     }
 }

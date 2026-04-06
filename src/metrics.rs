@@ -206,6 +206,50 @@ pub static SERVER_LIST_REFRESH_DURATION: LazyLock<Gauge> = LazyLock::new(|| {
     .unwrap()
 });
 
+// ---------------------------------------------------------------------------
+// WAL buffer
+// ---------------------------------------------------------------------------
+
+pub static BUFFER_BYTES: LazyLock<IntGauge> = LazyLock::new(|| {
+    register_int_gauge!(
+        "unverified_collector_buffer_bytes",
+        "Current WAL buffer size on disk in bytes."
+    )
+    .unwrap()
+});
+
+pub static BUFFER_SEGMENTS: LazyLock<IntGauge> = LazyLock::new(|| {
+    register_int_gauge!(
+        "unverified_collector_buffer_segments",
+        "Current number of WAL segment files."
+    )
+    .unwrap()
+});
+
+pub static BUFFER_WRITES: LazyLock<IntCounter> = LazyLock::new(|| {
+    register_int_counter!(
+        "unverified_collector_buffer_writes_total",
+        "Batches written to WAL buffer."
+    )
+    .unwrap()
+});
+
+pub static BUFFER_DRAINED: LazyLock<IntCounter> = LazyLock::new(|| {
+    register_int_counter!(
+        "unverified_collector_buffer_drained_total",
+        "WAL segments successfully drained and deleted."
+    )
+    .unwrap()
+});
+
+pub static BUFFER_EVICTED: LazyLock<IntCounter> = LazyLock::new(|| {
+    register_int_counter!(
+        "unverified_collector_buffer_evicted_total",
+        "WAL segments evicted because buffer exceeded max size."
+    )
+    .unwrap()
+});
+
 /// Ensure all lazy metrics are initialized.
 pub fn init() {
     LazyLock::force(&POLL_SUCCESS);
@@ -229,6 +273,11 @@ pub fn init() {
     LazyLock::force(&SERVER_LIST_REFRESH_SUCCESS);
     LazyLock::force(&SERVER_LIST_REFRESH_FAILURE);
     LazyLock::force(&SERVER_LIST_REFRESH_DURATION);
+    LazyLock::force(&BUFFER_BYTES);
+    LazyLock::force(&BUFFER_SEGMENTS);
+    LazyLock::force(&BUFFER_WRITES);
+    LazyLock::force(&BUFFER_DRAINED);
+    LazyLock::force(&BUFFER_EVICTED);
 }
 
 async fn handle_metrics(

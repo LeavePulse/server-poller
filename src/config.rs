@@ -44,6 +44,9 @@ pub struct CollectorSettings {
     pub plugin_compare_interval_seconds: u64,
     pub plugin_fallback_stale_seconds: u64,
     pub heartbeat_interval_seconds: u64,
+    pub buffer_dir: String,
+    pub buffer_max_bytes: u64,
+    pub buffer_segment_max_bytes: u64,
 }
 
 /// Geo lookup cache settings.
@@ -272,6 +275,18 @@ impl Settings {
                 heartbeat_interval_seconds: env_u64(
                     "COLLECTOR_HEARTBEAT_INTERVAL_SECONDS",
                     env_u64("HEARTBEAT_INTERVAL_SECONDS", 300),
+                ),
+                buffer_dir: env_str(
+                    "COLLECTOR_BUFFER_DIR",
+                    &env_str("BUFFER_DIR", "./data/buffer"),
+                ),
+                buffer_max_bytes: env_u64(
+                    "COLLECTOR_BUFFER_MAX_BYTES",
+                    env_u64("BUFFER_MAX_BYTES", 50 * 1024 * 1024),
+                ),
+                buffer_segment_max_bytes: env_u64(
+                    "COLLECTOR_BUFFER_SEGMENT_MAX_BYTES",
+                    env_u64("BUFFER_SEGMENT_MAX_BYTES", 2 * 1024 * 1024),
                 ),
             },
 

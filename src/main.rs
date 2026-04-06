@@ -8,6 +8,7 @@ mod models;
 mod ping;
 mod scheduler;
 mod sync;
+mod wal;
 
 use config::Settings;
 use tracing::info;
