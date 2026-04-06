@@ -152,7 +152,7 @@ impl WalBuffer {
     fn sorted_segments(dir: &Path) -> io::Result<Vec<fs::DirEntry>> {
         let mut entries: Vec<fs::DirEntry> = fs::read_dir(dir)?
             .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().map_or(false, |ext| ext == "wal"))
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "wal"))
             .collect();
         entries.sort_by_key(|e| e.file_name());
         Ok(entries)

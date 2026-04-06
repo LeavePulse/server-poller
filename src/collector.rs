@@ -171,10 +171,10 @@ async fn flush_batch(
                 Ok(Some((path, items))) => {
                     if !items.is_empty() {
                         let drain_ok = send_batch(http, headers, &items, monitoring_api).await;
-                        if drain_ok {
-                            if let Err(e) = wal.delete_segment(&path) {
-                                warn!("Failed to delete drained WAL segment: {e}");
-                            }
+                        if drain_ok
+                            && let Err(e) = wal.delete_segment(&path)
+                        {
+                            warn!("Failed to delete drained WAL segment: {e}");
                         }
                     } else {
                         // Empty segment (all records corrupted), just remove it.
