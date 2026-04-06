@@ -115,23 +115,16 @@ impl WalBuffer {
             return false;
         };
         let current_path = self.current_segment.as_ref().map(|s| &s.path);
-        segments
-            .iter()
-            .any(|e| Some(&e.path()) != current_path)
+        segments.iter().any(|e| Some(&e.path()) != current_path)
     }
 
     /// Read all records from the oldest completed segment (up to `max_items`).
     /// Returns the segment path and the decoded items.
-    pub fn read_oldest_batch(
-        &self,
-        max_items: usize,
-    ) -> io::Result<Option<(PathBuf, Vec<Value>)>> {
+    pub fn read_oldest_batch(&self, max_items: usize) -> io::Result<Option<(PathBuf, Vec<Value>)>> {
         let segments = Self::sorted_segments(&self.dir)?;
         let current_path = self.current_segment.as_ref().map(|s| &s.path);
 
-        let oldest = segments
-            .iter()
-            .find(|e| Some(&e.path()) != current_path);
+        let oldest = segments.iter().find(|e| Some(&e.path()) != current_path);
 
         let Some(entry) = oldest else {
             return Ok(None);
@@ -159,11 +152,7 @@ impl WalBuffer {
     fn sorted_segments(dir: &Path) -> io::Result<Vec<fs::DirEntry>> {
         let mut entries: Vec<fs::DirEntry> = fs::read_dir(dir)?
             .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.path()
-                    .extension()
-                    .map_or(false, |ext| ext == "wal")
-            })
+            .filter(|e| e.path().extension().map_or(false, |ext| ext == "wal"))
             .collect();
         entries.sort_by_key(|e| e.file_name());
         Ok(entries)
@@ -179,10 +168,7 @@ impl WalBuffer {
             .as_millis();
         let path = self.dir.join(format!("buffer-{ts}.wal"));
 
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)?;
+        let file = OpenOptions::new().create(true).append(true).open(&path)?;
 
         self.current_segment = Some(SegmentWriter {
             path,
@@ -197,9 +183,7 @@ impl WalBuffer {
         let current_path = self.current_segment.as_ref().map(|s| &s.path);
 
         // Evict the oldest segment that is NOT the current one.
-        let target = segments
-            .iter()
-            .find(|e| Some(&e.path()) != current_path);
+        let target = segments.iter().find(|e| Some(&e.path()) != current_path);
 
         let Some(entry) = target else {
             return Ok(false);

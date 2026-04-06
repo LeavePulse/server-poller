@@ -75,7 +75,15 @@ async fn ingest_loop(
             warn!("Failed to open WAL buffer: {e} — running without disk buffer");
             // Fall back to old behaviour with a dummy WAL that never has pending data.
             // We still enter the loop; send_batch failures will just be logged.
-            run_ingest_loop_no_wal(http, headers, result_rx, batch_size, flush_interval, monitoring_api).await;
+            run_ingest_loop_no_wal(
+                http,
+                headers,
+                result_rx,
+                batch_size,
+                flush_interval,
+                monitoring_api,
+            )
+            .await;
             return;
         }
     };
