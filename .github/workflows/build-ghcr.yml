@@ -3,7 +3,20 @@ name: build-and-push
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "README.md"
+      - "CHANGELOG.md"
+      - "LICENSE"
+      - "docs/**"
+      - "tests/**"
+      - ".github/dependabot.yml"
+      - ".github/workflows/code-quality.yml"
+      - ".github/workflows/discord-commit-notify.yml"
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -11,5 +24,5 @@ permissions:
 
 jobs:
   build:
-    uses: LeavePulse/service-toolkit/.github/workflows/reusable-build-ghcr.yml@71598238ad369add82cff53e0001ac4930f7a194
+    uses: LeavePulse/service-toolkit/.github/workflows/reusable-build-ghcr.yml@main
     secrets: inherit

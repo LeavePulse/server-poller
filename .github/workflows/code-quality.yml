@@ -2,15 +2,36 @@ name: code-quality
 
 on:
   pull_request:
+    paths-ignore:
+      - "README.md"
+      - "CHANGELOG.md"
+      - "LICENSE"
+      - "docs/**"
+      - ".github/dependabot.yml"
+      - ".github/workflows/build-ghcr.yml"
+      - ".github/workflows/discord-commit-notify.yml"
   push:
     branches: [main]
+    paths-ignore:
+      - "README.md"
+      - "CHANGELOG.md"
+      - "LICENSE"
+      - "docs/**"
+      - ".github/dependabot.yml"
+      - ".github/workflows/build-ghcr.yml"
+      - ".github/workflows/discord-commit-notify.yml"
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   check:
+    timeout-minutes: 30
     runs-on: [self-hosted, Linux, X64, runner-vps, ci-default]
 
     steps:
