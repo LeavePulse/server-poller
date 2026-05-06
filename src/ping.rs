@@ -1,5 +1,6 @@
 //! Minecraft server status polling via SLP (Java) and RakNet (Bedrock).
 
+use std::cmp::Ordering;
 use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream as StdTcpStream};
 use std::sync::Arc;
@@ -20,6 +21,10 @@ use crate::metrics::{
     BEDROCK_PROBE_DURATION, BEDROCK_PROBE_FAILURE, BEDROCK_PROBE_INFLIGHT, BEDROCK_PROBE_SUCCESS,
 };
 use crate::models::{Edition, ServerState, schedule_next_bedrock_probe};
+
+const SERVER_LIST_VERSION_NAME_EXTRA_KEY: &str = "server_list_version_name";
+const MINECRAFT_VERSION_MAJOR: i32 = 1;
+const VERSION_SUFFIX_PREFIXES: &[&str] = &["pre", "rc", "snapshot", "beta", "alpha"];
 
 /// Result of polling one server.
 pub struct PollResult {
@@ -196,7 +201,8 @@ async fn poll_java(
         Ok(Ok(response)) => {
             let online = response.players.online;
             let max_players = response.players.max;
-            let version = response.version.name.clone();
+            let raw_version = response.version.name.trim().to_string();
+            let version = sanitize_minecraft_version(&raw_version);
             let motd = motd_from_description(response.description.as_ref());
             let favicon = response
                 .favicon
@@ -210,6 +216,12 @@ async fn poll_java(
             let mut extra = serde_json::Map::new();
             if !players.is_empty() {
                 extra.insert("players".to_string(), json!(players));
+            }
+            if !raw_version.is_empty() && raw_version != version {
+                extra.insert(
+                    SERVER_LIST_VERSION_NAME_EXTRA_KEY.to_string(),
+                    json!(raw_version),
+                );
             }
 
             PollResult {
@@ -461,6 +473,182 @@ fn extract_player_names(sample: Option<&[JavaStatusPlayer]>) -> Vec<String> {
         .collect()
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct MinecraftVersionToken {
+    label: String,
+    parts: Vec<i32>,
+}
+
+fn sanitize_minecraft_version(raw: &str) -> String {
+    let normalized = normalize_version_candidate(raw);
+    if normalized.is_empty() {
+        return String::new();
+    }
+
+    if let Some(mc_value) = extract_mc_parenthetical(&normalized) {
+        let version = sanitize_minecraft_version(&mc_value);
+        if !version.is_empty() {
+            return version;
+        }
+    }
+
+    let Some((first, first_end)) = find_minecraft_version_token(&normalized, 0) else {
+        return String::new();
+    };
+
+    let after_first = &normalized[first_end..];
+    let spaces = after_first.len() - after_first.trim_start().len();
+    let after_spaces = &after_first[spaces..];
+    if let Some(after_dash) = after_spaces.strip_prefix('-') {
+        let more_spaces = after_dash.len() - after_dash.trim_start().len();
+        let second_start = first_end + spaces + 1 + more_spaces;
+        if let Some((second, _second_end)) =
+            parse_minecraft_version_token(&normalized, second_start)
+        {
+            return format_version_range(first, second);
+        }
+    }
+
+    first.label
+}
+
+fn normalize_version_candidate(raw: &str) -> String {
+    let mut stripped = String::new();
+    let mut skip_next = false;
+    for ch in raw.chars() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if ch == '§' {
+            skip_next = true;
+            continue;
+        }
+        stripped.push(ch);
+    }
+    stripped.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn extract_mc_parenthetical(value: &str) -> Option<String> {
+    let lower = value.to_ascii_lowercase();
+    let start = lower.find("(mc:")?;
+    let body_start = start + "(mc:".len();
+    let body_end = value[body_start..].find(')')?;
+    Some(value[body_start..body_start + body_end].trim().to_string())
+}
+
+fn find_minecraft_version_token(
+    value: &str,
+    start: usize,
+) -> Option<(MinecraftVersionToken, usize)> {
+    value[start..]
+        .char_indices()
+        .filter_map(|(offset, ch)| {
+            if ch != '1' {
+                return None;
+            }
+            let absolute = start + offset;
+            if !is_version_boundary_before(value, absolute) {
+                return None;
+            }
+            parse_minecraft_version_token(value, absolute)
+        })
+        .next()
+}
+
+fn parse_minecraft_version_token(
+    value: &str,
+    start: usize,
+) -> Option<(MinecraftVersionToken, usize)> {
+    let bytes = value.as_bytes();
+    let mut index = start;
+    let major_start = index;
+    index = parse_digits(bytes, index)?;
+    let major = value[major_start..index].parse::<i32>().ok()?;
+    if major != MINECRAFT_VERSION_MAJOR || bytes.get(index) != Some(&b'.') {
+        return None;
+    }
+
+    index += 1;
+    let minor_start = index;
+    index = parse_digits(bytes, index)?;
+    let minor = value[minor_start..index].parse::<i32>().ok()?;
+    let mut parts = vec![major, minor];
+
+    if bytes.get(index) == Some(&b'.') {
+        let patch_start = index + 1;
+        if matches!(bytes.get(patch_start), Some(b'x' | b'X')) {
+            index = patch_start + 1;
+        } else if let Some(patch_end) = parse_digits(bytes, patch_start) {
+            parts.push(value[patch_start..patch_end].parse::<i32>().ok()?);
+            index = patch_end;
+        }
+    }
+
+    if bytes.get(index) == Some(&b'-') && starts_with_version_suffix(&value[index + 1..]) {
+        index += 1;
+        while matches!(bytes.get(index), Some(b) if b.is_ascii_alphanumeric() || *b == b'.' || *b == b'-')
+        {
+            index += 1;
+        }
+    }
+
+    if matches!(bytes.get(index), Some(b) if b.is_ascii_alphanumeric()) {
+        return None;
+    }
+
+    let label = value[start..index]
+        .trim_end_matches(".x")
+        .trim_end_matches(".X")
+        .to_string();
+    Some((MinecraftVersionToken { label, parts }, index))
+}
+
+fn parse_digits(bytes: &[u8], mut index: usize) -> Option<usize> {
+    if !matches!(bytes.get(index), Some(b) if b.is_ascii_digit()) {
+        return None;
+    }
+    while matches!(bytes.get(index), Some(b) if b.is_ascii_digit()) {
+        index += 1;
+    }
+    Some(index)
+}
+
+fn starts_with_version_suffix(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    VERSION_SUFFIX_PREFIXES
+        .iter()
+        .any(|prefix| lower.starts_with(prefix))
+}
+
+fn is_version_boundary_before(value: &str, start: usize) -> bool {
+    value[..start]
+        .chars()
+        .next_back()
+        .is_none_or(|ch| !ch.is_ascii_alphanumeric() && ch != '.')
+}
+
+fn format_version_range(left: MinecraftVersionToken, right: MinecraftVersionToken) -> String {
+    match compare_version_parts(&left.parts, &right.parts) {
+        Ordering::Equal if left.label == right.label => left.label,
+        Ordering::Greater => format!("{}-{}", right.label, left.label),
+        _ => format!("{}-{}", left.label, right.label),
+    }
+}
+
+fn compare_version_parts(left: &[i32], right: &[i32]) -> Ordering {
+    let max_len = left.len().max(right.len());
+    for index in 0..max_len {
+        let left_value = left.get(index).copied().unwrap_or_default();
+        let right_value = right.get(index).copied().unwrap_or_default();
+        match left_value.cmp(&right_value) {
+            Ordering::Equal => {}
+            ordering => return ordering,
+        }
+    }
+    Ordering::Equal
+}
+
 fn motd_from_description(description: Option<&Value>) -> String {
     let mut motd = String::new();
     if let Some(value) = description {
@@ -677,7 +865,8 @@ mod tests {
 
     use super::{
         JavaConnectTarget, build_java_status_requests, motd_from_description,
-        ping_java_status_blocking, resolve_java_connect_target, write_varint,
+        ping_java_status_blocking, resolve_java_connect_target, sanitize_minecraft_version,
+        write_varint,
     };
 
     fn read_varint_bytes(data: &[u8], cursor: &mut usize) -> i32 {
@@ -810,6 +999,37 @@ mod tests {
 
         assert_eq!(packet_id, 0);
         assert_eq!(protocol, 767);
+    }
+
+    #[test]
+    fn sanitize_minecraft_version_rejects_player_count_status_text() {
+        assert_eq!(
+            sanitize_minecraft_version(
+                "\u{00a7}a\u{00a7}lJoin us -> \u{00a7}a \u{00a7}78 \u{00a7}8| \u{00a7}750"
+            ),
+            ""
+        );
+    }
+
+    #[test]
+    fn sanitize_minecraft_version_rejects_proxy_software_version() {
+        assert_eq!(sanitize_minecraft_version("Velocity 3.4.0"), "");
+    }
+
+    #[test]
+    fn sanitize_minecraft_version_keeps_proxy_supported_range() {
+        assert_eq!(
+            sanitize_minecraft_version("Velocity 1.7.2-1.21.11"),
+            "1.7.2-1.21.11"
+        );
+    }
+
+    #[test]
+    fn sanitize_minecraft_version_extracts_mc_parenthetical() {
+        assert_eq!(
+            sanitize_minecraft_version("Paper 1.20.1 (MC: 1.21.4)"),
+            "1.21.4"
+        );
     }
 
     #[tokio::test]
