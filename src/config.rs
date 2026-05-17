@@ -38,6 +38,9 @@ pub struct CollectorSettings {
     pub trigger_poll_seconds: f64,
     pub force_ping_queue_key: String,
     pub force_ping_pop_timeout_seconds: f64,
+    pub discovery_probe_queue_key: String,
+    pub discovery_probe_result_key_prefix: String,
+    pub discovery_probe_result_ttl_seconds: u64,
     pub initial_failures_before_slowdown: u32,
     pub initial_failure_slowdown_multiplier: f64,
     pub initial_failure_max_interval_seconds: u64,
@@ -249,6 +252,24 @@ impl Settings {
                 force_ping_pop_timeout_seconds: env_f64(
                     "COLLECTOR_FORCE_PING_POP_TIMEOUT_SECONDS",
                     env_f64("FORCE_PING_POP_TIMEOUT_SECONDS", 1.0),
+                ),
+                discovery_probe_queue_key: env_str(
+                    "COLLECTOR_DISCOVERY_PROBE_QUEUE_KEY",
+                    &env_str(
+                        "DISCOVERY_PROBE_QUEUE_KEY",
+                        "leavepulse:discovery:probe-request",
+                    ),
+                ),
+                discovery_probe_result_key_prefix: env_str(
+                    "COLLECTOR_DISCOVERY_PROBE_RESULT_KEY_PREFIX",
+                    &env_str(
+                        "DISCOVERY_PROBE_RESULT_KEY_PREFIX",
+                        "leavepulse:discovery:probe-result:",
+                    ),
+                ),
+                discovery_probe_result_ttl_seconds: env_u64(
+                    "COLLECTOR_DISCOVERY_PROBE_RESULT_TTL_SECONDS",
+                    env_u64("DISCOVERY_PROBE_RESULT_TTL_SECONDS", 86400),
                 ),
                 initial_failures_before_slowdown: env_u64(
                     "COLLECTOR_INITIAL_FAILURES_BEFORE_SLOWDOWN",

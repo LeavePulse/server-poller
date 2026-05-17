@@ -7,19 +7,22 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use reqwest::Client;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::sync::Mutex;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::config::Settings;
+use crate::geo::GeoCache;
 use crate::metrics::{
     SERVER_LIST_REFRESH_DURATION, SERVER_LIST_REFRESH_FAILURE, SERVER_LIST_REFRESH_SUCCESS,
     SERVERS_TOTAL,
 };
 use crate::models::{
-    ServerListResponse, ServerState, build_state, is_plugin_fallback_mode, is_plugin_managed,
-    normalize_edition, parse_address, resolve_state_ports, seed_bedrock_probe, wants_bedrock_probe,
+    Edition, ServerListResponse, ServerState, build_state, is_plugin_fallback_mode,
+    is_plugin_managed, normalize_edition, parse_address, resolve_state_ports, seed_bedrock_probe,
+    wants_bedrock_probe,
 };
+use crate::ping::poll_server;
 use crate::scheduler::SchedulerHandle;
 
 /// Fetch all servers from server-service (paginated).
@@ -459,6 +462,192 @@ pub async fn redis_force_ping_loop(
             }
         }
     }
+}
+
+/// Listen to Redis BLPOP for ad-hoc discovery candidate probes.
+///
+/// Discovery candidates are not yet `Server` rows (they live in
+/// `server_discovery_candidates` until an admin approves them) so they have
+/// no entry in the poller's scheduler. Instead, the discovery worker and the
+/// admin preview endpoint push `{candidate_id, host, port, edition}` JSON
+/// payloads to `leavepulse:discovery:probe-request`, and we answer with the
+/// raw probe result at `leavepulse:discovery:probe-result:{candidate_id}`.
+pub async fn redis_discovery_probe_loop(
+    http: Client,
+    redis_url: String,
+    geo_cache: Arc<GeoCache>,
+    settings: Arc<Settings>,
+) {
+    let queue_key = settings.collector.discovery_probe_queue_key.trim().to_string();
+    if queue_key.is_empty() {
+        return;
+    }
+    let result_prefix = settings
+        .collector
+        .discovery_probe_result_key_prefix
+        .trim()
+        .to_string();
+    if result_prefix.is_empty() {
+        return;
+    }
+    let ttl_seconds = settings
+        .collector
+        .discovery_probe_result_ttl_seconds
+        .max(60);
+
+    let client = match redis::Client::open(redis_url.as_str()) {
+        Ok(c) => c,
+        Err(e) => {
+            warn!("Failed to connect Redis for discovery probe: {e}");
+            return;
+        }
+    };
+
+    let mut conn = match client.get_multiplexed_async_connection().await {
+        Ok(c) => c,
+        Err(e) => {
+            warn!("Redis discovery probe connection failed: {e}");
+            return;
+        }
+    };
+
+    let pop_timeout = settings
+        .collector
+        .force_ping_pop_timeout_seconds
+        .max(0.5) as usize;
+
+    loop {
+        let popped: Result<Option<(String, String)>, _> = redis::cmd("BLPOP")
+            .arg(&queue_key)
+            .arg(pop_timeout)
+            .query_async(&mut conn)
+            .await;
+
+        match popped {
+            Ok(Some((_key, raw))) => {
+                let raw = raw.trim().to_string();
+                if raw.is_empty() {
+                    continue;
+                }
+                let request: DiscoveryProbeRequest = match serde_json::from_str(&raw) {
+                    Ok(req) => req,
+                    Err(e) => {
+                        warn!("Discovery probe: invalid request payload {raw:?}: {e}");
+                        continue;
+                    }
+                };
+                let DiscoveryProbeRequest {
+                    candidate_id,
+                    host,
+                    port,
+                    edition,
+                } = request;
+                let host = host.trim().to_string();
+                if candidate_id.trim().is_empty() || host.is_empty() {
+                    warn!("Discovery probe: missing candidate_id or host in {raw:?}");
+                    continue;
+                }
+                let edition_parsed = match edition.as_deref() {
+                    Some(value) if value.eq_ignore_ascii_case("bedrock") => Edition::Bedrock,
+                    _ => Edition::Java,
+                };
+
+                let started = Instant::now();
+                let result = poll_server(
+                    &http,
+                    &candidate_id,
+                    &host,
+                    port,
+                    edition_parsed,
+                    &geo_cache,
+                    &settings,
+                )
+                .await;
+                let elapsed_ms = started.elapsed().as_millis() as u64;
+
+                let probed_at = Utc::now().to_rfc3339();
+                let payload_obj = result.payload.as_object();
+                let online = payload_obj
+                    .and_then(|m| m.get("online"))
+                    .and_then(Value::as_u64);
+                let max_players = payload_obj
+                    .and_then(|m| m.get("max_players"))
+                    .and_then(Value::as_u64);
+                let version = payload_obj
+                    .and_then(|m| m.get("version"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let motd = payload_obj
+                    .and_then(|m| m.get("motd"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+
+                let probe_response = json!({
+                    "candidate_id": candidate_id,
+                    "status_ok": result.status_ok,
+                    "error": if result.status_ok { Value::Null } else { json!("probe failed") },
+                    "probed_at": probed_at,
+                    "host": host,
+                    "port": port,
+                    "edition": match edition_parsed {
+                        Edition::Bedrock => "bedrock",
+                        Edition::Java => "java",
+                    },
+                    "online": online,
+                    "max_players": max_players,
+                    "version": version,
+                    "motd": motd,
+                    "favicon": result.favicon,
+                    "elapsed_ms": elapsed_ms,
+                });
+                let body = match serde_json::to_vec(&probe_response) {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        warn!("Discovery probe: failed to encode result for {candidate_id}: {e}");
+                        continue;
+                    }
+                };
+                let key = format!("{result_prefix}{candidate_id}");
+                let set: Result<(), _> = redis::cmd("SET")
+                    .arg(&key)
+                    .arg(body)
+                    .arg("EX")
+                    .arg(ttl_seconds)
+                    .query_async(&mut conn)
+                    .await;
+                match set {
+                    Ok(()) => {
+                        info!(
+                            "Discovery probe: candidate={} host={}:{:?} ok={} elapsed_ms={}",
+                            candidate_id, host, port, result.status_ok, elapsed_ms
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Discovery probe: failed to write result for {candidate_id}: {e}"
+                        );
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                debug!("Discovery probe loop error: {e}");
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        }
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct DiscoveryProbeRequest {
+    candidate_id: String,
+    host: String,
+    #[serde(default)]
+    port: Option<u16>,
+    #[serde(default)]
+    edition: Option<String>,
 }
 
 #[cfg(test)]

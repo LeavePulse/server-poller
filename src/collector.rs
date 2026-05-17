@@ -363,6 +363,14 @@ pub async fn run(settings: Settings) {
             scheduler.clone(),
             settings.clone(),
         ));
+
+        // Spawn ad-hoc discovery candidate probe loop (admin preview).
+        tokio::spawn(crate::sync::redis_discovery_probe_loop(
+            http.clone(),
+            settings.redis.url.clone(),
+            geo_cache.clone(),
+            settings.clone(),
+        ));
     }
 
     // Prometheus metrics server.
