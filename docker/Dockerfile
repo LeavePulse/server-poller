@@ -2,21 +2,34 @@
 
 FROM rust:1.94-slim AS builder
 
+# git: fetch the private service-toolkit-rust git dependency.
+# pkg-config/libssl: native TLS deps. protoc is NOT needed — build.rs sources
+# it from protoc-bin-vendored.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends pkg-config libssl-dev && \
+    apt-get install -y --no-install-recommends pkg-config libssl-dev git && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Cache dependencies by building a dummy project first.
-COPY Cargo.toml Cargo.lock* ./
-RUN mkdir src && echo 'fn main() {}' > src/main.rs && \
-    cargo build --release && \
-    rm -rf src
+# Authenticate to GitHub for the private git dependency.
+RUN --mount=type=secret,id=github_token \
+    set -eu && \
+    echo "machine github.com login x-access-token password $(cat /run/secrets/github_token)" > ~/.netrc && \
+    chmod 600 ~/.netrc
 
-# Build the real binary.
+# build.rs needs the protos at compile time, so copy the full source up front.
+# (No dummy-build dependency caching: build.rs + tonic codegen need proto/ and
+# src/ present, which defeats the dummy trick.)
+COPY Cargo.toml Cargo.lock* build.rs ./
+COPY proto/ ./proto/
 COPY src/ ./src/
-RUN touch src/main.rs && cargo build --release
+
+RUN --mount=type=secret,id=github_token \
+    set -eu && \
+    echo "machine github.com login x-access-token password $(cat /run/secrets/github_token)" > ~/.netrc && \
+    chmod 600 ~/.netrc && \
+    cargo build --release && \
+    rm -f ~/.netrc
 
 # --- Production image ---
 FROM debian:bookworm-slim
