@@ -1,0 +1,78 @@
+syntax = "proto3";
+
+package leavepulse.monitoring.v1;
+
+option java_multiple_files = true;
+
+service MonitoringInternalService {
+  rpc GetPlayerStats(GetPlayerStatsRequest) returns (PlayerStatsResponse);
+  rpc GetLandingStats(GetLandingStatsRequest) returns (LandingStatsResponse);
+  // Batch metric ingest from the unverified poller (collector-vps).
+  // Replaces POST /monitoring/ingest/unverified.
+  rpc IngestUnverified(IngestUnverifiedRequest) returns (IngestResponse);
+}
+
+// Single metric sample. Mirrors monitoring_service.api.ingest.IngestPoint.
+message IngestPoint {
+  int64 server_id = 1;
+  optional string collected_at = 2;
+  optional int32 online = 3;
+  optional int32 max_players = 4;
+  optional string version = 5;
+  optional string motd = 6;
+  optional string favicon = 7;
+  optional string country = 8;
+  optional string country_code = 9;
+  optional string event_type = 10;
+  optional string player_id = 11;
+  optional string player_name = 12;
+  optional int32 online_delta = 13;
+  // Arbitrary nested data (e.g. {"players": [...]}) carried as a JSON string,
+  // since proto cannot represent the open-ended ``extra`` dict natively.
+  optional string extra_json = 14;
+}
+
+message IngestUnverifiedRequest {
+  repeated IngestPoint items = 1;
+}
+
+message IngestResponse {
+  int32 accepted = 1;
+}
+
+message MinecraftIdentity {
+  string minecraft_uuid = 1;
+  string minecraft_nick = 2;
+}
+
+message GetPlayerStatsRequest {
+  oneof identifier {
+    int64 user_id = 1;
+    MinecraftIdentity minecraft_identity = 10;
+  }
+
+  int64 server_id = 2;
+
+  // When empty, totals are unscoped across all events matching the identifier.
+  repeated int64 project_server_ids = 3;
+
+  // When 0, server_playtime_seconds is computed for server_id.
+  int64 named_server_id = 4;
+}
+
+message PlayerStatsResponse {
+  bool found = 1;
+  int64 total_playtime_seconds = 2;
+  int64 server_playtime_seconds = 3;
+  optional string source = 4;
+  // Per-server breakdown filtered to project_server_ids when supplied.
+  map<int64, int64> per_server_seconds = 5;
+}
+
+message GetLandingStatsRequest {}
+
+message LandingStatsResponse {
+  int64 players_with_profile = 1;
+  int64 total_playtime_hours = 2;
+  int64 registered_profiles = 3;
+}

@@ -1,0 +1,71 @@
+syntax = "proto3";
+
+package leavepulse.server.v1;
+
+option java_multiple_files = true;
+
+service CatalogService {
+  rpc Resolve(CatalogResolveRequest) returns (ServerCatalogListResponse);
+  rpc GetServer(GetServerRequest) returns (ServerCatalogItem);
+  rpc ListServers(ListServersRequest) returns (ServerCatalogListResponse);
+  rpc GetRoot(GetRootRequest) returns (GetRootResponse);
+  rpc GetSubservers(GetSubserversRequest) returns (GetSubserversResponse);
+}
+
+message ServerCatalogItem {
+  string id = 1;
+  optional string project_id = 2;
+  optional string project_online_strategy = 3;
+  string ip_or_domain = 4;
+  string server_role = 5;
+  optional string proxy_type = 6;
+  optional string parent_id = 7;
+  optional string ping_ip_or_domain = 8;
+  optional int32 ping_port = 9;
+  optional int32 bedrock_port = 10;
+  optional string game_edition = 11;
+  bool is_verified = 12;
+  optional string verification_source = 13;
+  // RFC3339 timestamp; read by the poller to gate verified-plugin logic.
+  optional string verified_plugin_last_seen_at = 14;
+}
+
+message CatalogResolveRequest {
+  repeated int64 server_ids = 1;
+}
+
+message GetServerRequest {
+  int64 server_id = 1;
+}
+
+message ListServersRequest {
+  int32 page = 1;
+  int32 limit = 2;
+  optional string role = 3;
+  optional int64 parent_id = 4;
+}
+
+message ServerCatalogListResponse {
+  repeated ServerCatalogItem items = 1;
+  int32 total = 2;
+  int32 page = 3;
+  int32 limit = 4;
+}
+
+message GetRootRequest {
+  int64 server_id = 1;
+}
+
+message GetRootResponse {
+  int64 server_id = 1;
+  int64 project_id = 2;
+  int64 root_server_id = 3;
+}
+
+message GetSubserversRequest {
+  int64 server_id = 1;
+}
+
+message GetSubserversResponse {
+  repeated int64 subserver_ids = 1;
+}

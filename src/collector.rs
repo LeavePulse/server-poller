@@ -6,29 +6,20 @@ use std::time::{Duration, Instant};
 
 use rand::Rng;
 use reqwest::Client;
-use serde_json::{Value, json};
+use serde_json::Value;
 use tokio::sync::{Mutex, mpsc};
 use tracing::{info, warn};
 
 use crate::change_detection::build_change_payload;
-use crate::config::Settings;
+use crate::config::{MonitoringApiSettings, Settings};
 use crate::geo::GeoCache;
+use crate::grpc_clients::{auth_channel, monitoring_client, value_to_ingest_point};
+use crate::grpc_clients::monitoring::v1::IngestUnverifiedRequest;
+use crate::grpc_clients::monitoring::v1::IngestPoint;
 use crate::metrics::*;
 use crate::models::{ServerState, is_internal_only_host};
 use crate::ping::{maybe_probe_bedrock, maybe_update_favicon, poll_server};
 use crate::scheduler::SchedulerHandle;
-
-/// Build auth headers from an optional bearer token.
-pub fn build_headers(token: &Option<String>) -> Option<reqwest::header::HeaderMap> {
-    token.as_ref().map(|t| {
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(
-            reqwest::header::AUTHORIZATION,
-            reqwest::header::HeaderValue::from_str(&format!("Bearer {t}")).unwrap(),
-        );
-        headers
-    })
-}
 
 /// Run the scheduler → work_queue dispatch loop.
 async fn scheduler_loop(
@@ -55,15 +46,10 @@ async fn scheduler_loop(
 
 /// Batch results and POST them to monitoring-service.
 /// Failed batches are persisted to a WAL buffer on disk and drained on recovery.
-async fn ingest_loop(
-    http: Client,
-    headers: Option<reqwest::header::HeaderMap>,
-    mut result_rx: mpsc::Receiver<Value>,
-    settings: Arc<Settings>,
-) {
+async fn ingest_loop(mut result_rx: mpsc::Receiver<Value>, settings: Arc<Settings>) {
     let batch_size = settings.collector.ingest_batch_size;
     let flush_interval = Duration::from_secs_f64(settings.collector.ingest_flush_seconds);
-    let monitoring_api = &settings.monitoring.api;
+    let monitoring = settings.monitoring.clone();
 
     let mut wal = match crate::wal::WalBuffer::open(
         std::path::PathBuf::from(&settings.collector.buffer_dir),
@@ -75,15 +61,7 @@ async fn ingest_loop(
             warn!("Failed to open WAL buffer: {e} — running without disk buffer");
             // Fall back to old behaviour with a dummy WAL that never has pending data.
             // We still enter the loop; send_batch failures will just be logged.
-            run_ingest_loop_no_wal(
-                http,
-                headers,
-                result_rx,
-                batch_size,
-                flush_interval,
-                monitoring_api,
-            )
-            .await;
+            run_ingest_loop_no_wal(monitoring, result_rx, batch_size, flush_interval).await;
             return;
         }
     };
@@ -98,7 +76,7 @@ async fn ingest_loop(
                     Some(payload) => {
                         batch.push(payload);
                         if batch.len() >= batch_size {
-                            flush_batch(&http, &headers, &mut batch, monitoring_api, &mut wal, batch_size).await;
+                            flush_batch(&monitoring, &mut batch, &mut wal, batch_size).await;
                             deadline = tokio::time::Instant::now() + flush_interval;
                         }
                     }
@@ -107,7 +85,7 @@ async fn ingest_loop(
             }
             _ = tokio::time::sleep_until(deadline) => {
                 if !batch.is_empty() {
-                    flush_batch(&http, &headers, &mut batch, monitoring_api, &mut wal, batch_size).await;
+                    flush_batch(&monitoring, &mut batch, &mut wal, batch_size).await;
                 }
                 deadline = tokio::time::Instant::now() + flush_interval;
             }
@@ -117,12 +95,10 @@ async fn ingest_loop(
 
 /// Fallback ingest loop when WAL cannot be opened (original behaviour).
 async fn run_ingest_loop_no_wal(
-    http: Client,
-    headers: Option<reqwest::header::HeaderMap>,
+    monitoring: MonitoringApiSettings,
     mut result_rx: mpsc::Receiver<Value>,
     batch_size: usize,
     flush_interval: Duration,
-    monitoring_api: &str,
 ) {
     let mut batch: Vec<Value> = Vec::with_capacity(batch_size);
     let mut deadline = tokio::time::Instant::now() + flush_interval;
@@ -134,7 +110,7 @@ async fn run_ingest_loop_no_wal(
                     Some(payload) => {
                         batch.push(payload);
                         if batch.len() >= batch_size {
-                            send_batch(&http, &headers, &batch, monitoring_api).await;
+                            send_batch(&monitoring, &batch).await;
                             batch.clear();
                             deadline = tokio::time::Instant::now() + flush_interval;
                         }
@@ -144,7 +120,7 @@ async fn run_ingest_loop_no_wal(
             }
             _ = tokio::time::sleep_until(deadline) => {
                 if !batch.is_empty() {
-                    send_batch(&http, &headers, &batch, monitoring_api).await;
+                    send_batch(&monitoring, &batch).await;
                     batch.clear();
                 }
                 deadline = tokio::time::Instant::now() + flush_interval;
@@ -155,14 +131,12 @@ async fn run_ingest_loop_no_wal(
 
 /// Send a batch and handle WAL write-on-failure / drain-on-success.
 async fn flush_batch(
-    http: &Client,
-    headers: &Option<reqwest::header::HeaderMap>,
+    monitoring: &MonitoringApiSettings,
     batch: &mut Vec<Value>,
-    monitoring_api: &str,
     wal: &mut crate::wal::WalBuffer,
     drain_max: usize,
 ) {
-    let ok = send_batch(http, headers, batch, monitoring_api).await;
+    let ok = send_batch(monitoring, batch).await;
     if ok {
         batch.clear();
         // Drain one buffered segment on success.
@@ -170,7 +144,7 @@ async fn flush_batch(
             match wal.read_oldest_batch(drain_max) {
                 Ok(Some((path, items))) => {
                     if !items.is_empty() {
-                        let drain_ok = send_batch(http, headers, &items, monitoring_api).await;
+                        let drain_ok = send_batch(monitoring, &items).await;
                         if drain_ok && let Err(e) = wal.delete_segment(&path) {
                             warn!("Failed to delete drained WAL segment: {e}");
                         }
@@ -192,37 +166,32 @@ async fn flush_batch(
     }
 }
 
-/// Send a batch to monitoring-service. Returns `true` on success.
-async fn send_batch(
-    http: &Client,
-    headers: &Option<reqwest::header::HeaderMap>,
-    batch: &[Value],
-    monitoring_api: &str,
-) -> bool {
-    let payload = json!({"items": batch});
-    let url = format!("{monitoring_api}/monitoring/ingest/unverified");
+/// Send a batch to monitoring-service over gRPC. Returns `true` on success.
+async fn send_batch(monitoring: &MonitoringApiSettings, batch: &[Value]) -> bool {
+    let token = monitoring.api_token.as_deref().unwrap_or_default();
+    let channel = match auth_channel(&monitoring.grpc_target, token) {
+        Ok(c) => c,
+        Err(e) => {
+            INGEST_FAILURE.inc();
+            warn!("Failed to build ingest gRPC channel: {e}");
+            return false;
+        }
+    };
+    let mut client = monitoring_client(channel);
+    let items: Vec<IngestPoint> = batch.iter().map(value_to_ingest_point).collect();
+    let request = IngestUnverifiedRequest { items };
 
-    let mut req = http.post(&url).json(&payload);
-    if let Some(h) = headers {
-        req = req.headers(h.clone());
-    }
-
-    match req.send().await {
-        Ok(resp) if resp.status().is_success() => {
+    match client.ingest_unverified(request).await {
+        Ok(_) => {
             INGEST_SUCCESS.inc();
             INGEST_ROWS.inc_by(batch.len() as u64);
             INGEST_BATCH_SIZE_HISTOGRAM.observe(batch.len() as f64);
             info!("Forwarded {} rows to monitoring-service", batch.len());
             true
         }
-        Ok(resp) => {
+        Err(status) => {
             INGEST_FAILURE.inc();
-            warn!("Failed to forward rows: HTTP {}", resp.status());
-            false
-        }
-        Err(e) => {
-            INGEST_FAILURE.inc();
-            warn!("Failed to forward rows: {e}");
+            warn!("Failed to forward rows: {status}");
             false
         }
     }
@@ -257,9 +226,6 @@ pub async fn run(settings: Settings) {
         .build()
         .expect("Failed to build HTTP client");
 
-    let core_headers = build_headers(&settings.server.api_token);
-    let monitoring_headers = build_headers(&settings.monitoring.api_token);
-
     // Shared state.
     let states: Arc<Mutex<HashMap<String, ServerState>>> = Arc::new(Mutex::new(HashMap::new()));
     let scheduler = SchedulerHandle::new();
@@ -269,7 +235,7 @@ pub async fn run(settings: Settings) {
     );
 
     // Initial server catalog fetch.
-    crate::sync::refresh_servers_once(&http, &core_headers, &states, &scheduler, &settings).await;
+    crate::sync::refresh_servers_once(&states, &scheduler, &settings).await;
 
     // Channels.
     let (work_tx, work_rx) = mpsc::channel::<String>(settings.collector.max_concurrency * 4);
@@ -284,7 +250,6 @@ pub async fn run(settings: Settings) {
     // Spawn workers.
     for id in 0..settings.collector.max_concurrency {
         let http = http.clone();
-        let core_headers = core_headers.clone();
         let states = states.clone();
         let scheduler = scheduler.clone();
         let geo_cache = geo_cache.clone();
@@ -305,7 +270,6 @@ pub async fn run(settings: Settings) {
                 process_work_item(
                     id,
                     &http,
-                    &core_headers,
                     &states,
                     &scheduler,
                     &geo_cache,
@@ -321,12 +285,7 @@ pub async fn run(settings: Settings) {
     drop(result_tx.clone());
 
     // Spawn ingest loop.
-    tokio::spawn(ingest_loop(
-        http.clone(),
-        monitoring_headers,
-        result_rx,
-        settings.clone(),
-    ));
+    tokio::spawn(ingest_loop(result_rx, settings.clone()));
 
     // Spawn metrics loop.
     if settings.prometheus.enabled {
@@ -339,8 +298,6 @@ pub async fn run(settings: Settings) {
 
     // Spawn catalog refresh loop.
     tokio::spawn(crate::sync::refresh_servers_loop(
-        http.clone(),
-        core_headers.clone(),
         states.clone(),
         scheduler.clone(),
         settings.clone(),
@@ -356,8 +313,6 @@ pub async fn run(settings: Settings) {
     // Spawn Redis force-ping loop (if enabled).
     if settings.redis.enabled {
         tokio::spawn(crate::sync::redis_force_ping_loop(
-            http.clone(),
-            core_headers.clone(),
             settings.redis.url.clone(),
             states.clone(),
             scheduler.clone(),
@@ -395,7 +350,6 @@ pub async fn run(settings: Settings) {
 async fn process_work_item(
     _worker_id: usize,
     http: &Client,
-    core_headers: &Option<reqwest::header::HeaderMap>,
     states: &Arc<Mutex<HashMap<String, ServerState>>>,
     scheduler: &SchedulerHandle,
     geo_cache: &Arc<GeoCache>,
@@ -475,18 +429,11 @@ async fn process_work_item(
         }
 
         // Bedrock probe.
-        maybe_probe_bedrock(http, core_headers, state, settings).await;
+        maybe_probe_bedrock(state, settings).await;
 
         // Favicon update.
         if !poll_result.favicon.is_empty() {
-            maybe_update_favicon(
-                http,
-                core_headers,
-                state,
-                &poll_result.favicon,
-                &settings.server.api,
-            )
-            .await;
+            maybe_update_favicon(&settings.server, state, &poll_result.favicon).await;
         }
 
         // Next interval.

@@ -4,7 +4,6 @@ use std::net::IpAddr;
 
 use chrono::{DateTime, Utc};
 use rand::Rng;
-use serde::Deserialize;
 use serde_json::Value;
 
 pub const JAVA_DEFAULT_PORT: u16 = 25565;
@@ -76,15 +75,6 @@ impl Edition {
             Edition::Bedrock => BEDROCK_DEFAULT_PORT,
         }
     }
-}
-
-/// Paginated server list response from server-service.
-#[derive(Debug, Deserialize)]
-pub struct ServerListResponse {
-    #[serde(default)]
-    pub items: Vec<Value>,
-    #[serde(default)]
-    pub total: u64,
 }
 
 /// Parse "host[:port]" including IPv6 bracket notation.

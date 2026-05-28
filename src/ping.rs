@@ -15,8 +15,10 @@ use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
 
 use crate::bedrock;
-use crate::config::Settings;
+use crate::config::{ServerApiSettings, Settings};
 use crate::geo::GeoCache;
+use crate::grpc_clients::server::v1::{UpdateServerEditionRequest, UpdateServerFaviconRequest};
+use crate::grpc_clients::{auth_channel, internal_servers_client};
 use crate::metrics::{
     BEDROCK_PROBE_DURATION, BEDROCK_PROBE_FAILURE, BEDROCK_PROBE_INFLIGHT, BEDROCK_PROBE_SUCCESS,
 };
@@ -739,41 +741,39 @@ pub fn favicon_hash(value: &str) -> Option<String> {
 
 /// Upload a changed favicon to server-service.
 pub async fn maybe_update_favicon(
-    http: &Client,
-    headers: &Option<reqwest::header::HeaderMap>,
+    server: &ServerApiSettings,
     state: &mut ServerState,
     favicon_str: &str,
-    server_api: &str,
 ) {
-    let Some(hdrs) = headers else { return };
     let Some(hash) = favicon_hash(favicon_str) else {
         return;
     };
     if state.last_favicon_hash.as_deref() == Some(&hash) {
         return;
     }
-    let url = format!("{server_api}/internal/servers/{}/favicon", state.server_id);
-    let body = json!({"data_url": favicon_str, "hash": hash});
-    match http
-        .post(&url)
-        .headers(hdrs.clone())
-        .json(&body)
-        .send()
-        .await
-    {
-        Ok(resp) if resp.status().is_success() => {
+    let Ok(server_id) = state.server_id.parse::<i64>() else {
+        return;
+    };
+    let token = server.api_token.as_deref().unwrap_or_default();
+    let channel = match auth_channel(&server.grpc_target, token) {
+        Ok(c) => c,
+        Err(e) => {
+            warn!("Failed to build favicon gRPC channel: {e}");
+            return;
+        }
+    };
+    let mut client = internal_servers_client(channel);
+    let request = UpdateServerFaviconRequest {
+        server_id,
+        data_url: favicon_str.to_string(),
+    };
+    match client.update_server_favicon(request).await {
+        Ok(_) => {
             state.last_favicon_hash = Some(hash);
             debug!("Updated favicon for {}", state.server_id);
         }
-        Ok(resp) => {
-            warn!(
-                "Failed to update favicon for {}: HTTP {}",
-                state.server_id,
-                resp.status()
-            );
-        }
-        Err(e) => {
-            warn!("Failed to update favicon for {}: {e}", state.server_id);
+        Err(status) => {
+            warn!("Failed to update favicon for {}: {status}", state.server_id);
         }
     }
 }
@@ -784,12 +784,7 @@ pub async fn probe_bedrock_support(host: &str, port: u16, timeout: Duration) -> 
 }
 
 /// Check and potentially probe bedrock support, updating state and server-service.
-pub async fn maybe_probe_bedrock(
-    http: &Client,
-    headers: &Option<reqwest::header::HeaderMap>,
-    state: &mut ServerState,
-    settings: &Settings,
-) {
+pub async fn maybe_probe_bedrock(state: &mut ServerState, settings: &Settings) {
     if state.next_bedrock_probe.is_none() {
         return;
     }
@@ -809,38 +804,31 @@ pub async fn maybe_probe_bedrock(
 
     if ok {
         BEDROCK_PROBE_SUCCESS.inc();
-        if let Some(hdrs) = headers {
-            let url = format!(
-                "{}/internal/servers/{}/edition",
-                settings.server.api, state.server_id
-            );
-            let body = json!({"game_edition": "java_bedrock"});
-            match http
-                .patch(&url)
-                .headers(hdrs.clone())
-                .json(&body)
-                .send()
-                .await
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    if let Some(obj) = state.server.as_object_mut() {
-                        obj.insert(
-                            "game_edition".to_string(),
-                            Value::String("java_bedrock".to_string()),
-                        );
+        if let Ok(server_id) = state.server_id.parse::<i64>() {
+            let token = settings.server.api_token.as_deref().unwrap_or_default();
+            match auth_channel(&settings.server.grpc_target, token) {
+                Ok(channel) => {
+                    let mut client = internal_servers_client(channel);
+                    let request = UpdateServerEditionRequest {
+                        server_id,
+                        game_edition: "java_bedrock".to_string(),
+                    };
+                    match client.update_server_edition(request).await {
+                        Ok(_) => {
+                            if let Some(obj) = state.server.as_object_mut() {
+                                obj.insert(
+                                    "game_edition".to_string(),
+                                    Value::String("java_bedrock".to_string()),
+                                );
+                            }
+                            info!("Updated server {} edition to java_bedrock", state.server_id);
+                        }
+                        Err(status) => {
+                            warn!("Failed to update edition for {}: {status}", state.server_id);
+                        }
                     }
-                    info!("Updated server {} edition to java_bedrock", state.server_id);
                 }
-                Ok(resp) => {
-                    warn!(
-                        "Failed to update edition for {}: HTTP {}",
-                        state.server_id,
-                        resp.status()
-                    );
-                }
-                Err(e) => {
-                    warn!("Failed to update edition for {}: {e}", state.server_id);
-                }
+                Err(e) => warn!("Failed to build edition gRPC channel: {e}"),
             }
         }
     } else {

@@ -1,0 +1,56 @@
+syntax = "proto3";
+
+package leavepulse.server.v1;
+
+option java_multiple_files = true;
+
+// Server-write endpoints for internal collectors / pollers.
+// Called by the unverified collector + monitoring poller via
+// x-internal-token (no user JWT).
+service InternalServersService {
+  rpc UpdateServerEdition(UpdateServerEditionRequest)
+      returns (UpdateServerEditionResult);
+  rpc UpdateServerFavicon(UpdateServerFaviconRequest)
+      returns (UpdateServerFaviconResult);
+}
+
+// ── UpdateServerEdition ───────────────────────────────────────────────
+
+message UpdateServerEditionRequest {
+  int64 server_id = 1;
+  // One of: "java", "bedrock", "java_bedrock".
+  string game_edition = 2;
+}
+
+// Mirrors the ``ServerCatalogItem`` fields the collector reads back to
+// stay aligned with the catalog HTTP response.
+message UpdateServerEditionResult {
+  int64 server_id = 1;
+  optional int64 project_id = 2;
+  optional string project_online_strategy = 3;
+  string ip_or_domain = 4;
+  string server_role = 5;
+  optional string proxy_type = 6;
+  optional int64 parent_id = 7;
+  optional string ping_ip_or_domain = 8;
+  optional int32 ping_port = 9;
+  optional int32 bedrock_port = 10;
+  optional string game_edition = 11;
+  bool is_verified = 12;
+  optional string verification_source = 13;
+}
+
+// ── UpdateServerFavicon ───────────────────────────────────────────────
+
+// ``data_url`` is the legacy ``data:image/...;base64,...`` payload the
+// collector built from the SLP favicon field. The servicer enforces
+// ``MAX_ICON_BYTES`` on the decoded image.
+message UpdateServerFaviconRequest {
+  int64 server_id = 1;
+  string data_url = 2;
+}
+
+message UpdateServerFaviconResult {
+  bool changed = 1;
+  optional string favicon_url = 2;
+}

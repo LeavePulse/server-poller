@@ -11,131 +11,99 @@ use serde_json::{Value, json};
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
-use crate::config::Settings;
+use crate::config::{ServerApiSettings, Settings};
 use crate::geo::GeoCache;
+use crate::grpc_clients::server::v1::ListServersRequest;
+use crate::grpc_clients::server::v1::catalog_service_client::CatalogServiceClient;
+use crate::grpc_clients::server::v1::GetServerRequest;
+use crate::grpc_clients::{AuthChannel, auth_channel, catalog_client, catalog_item_to_value};
 use crate::metrics::{
     SERVER_LIST_REFRESH_DURATION, SERVER_LIST_REFRESH_FAILURE, SERVER_LIST_REFRESH_SUCCESS,
     SERVERS_TOTAL,
 };
 use crate::models::{
-    Edition, ServerListResponse, ServerState, build_state, is_plugin_fallback_mode,
+    Edition, ServerState, build_state, is_plugin_fallback_mode,
     is_plugin_managed, normalize_edition, parse_address, resolve_state_ports, seed_bedrock_probe,
     wants_bedrock_probe,
 };
 use crate::ping::poll_server;
 use crate::scheduler::SchedulerHandle;
 
-/// Fetch all servers from server-service (paginated).
-pub async fn fetch_servers(
-    http: &Client,
-    headers: &Option<reqwest::header::HeaderMap>,
-    server_api: &str,
-    page_size: u64,
-) -> Vec<Value> {
+/// Fetch all servers from server-service via the catalog gRPC service (paginated).
+pub async fn fetch_servers(server: &ServerApiSettings, page_size: u64) -> Vec<Value> {
+    let token = server.api_token.as_deref().unwrap_or_default();
+    let channel = match auth_channel(&server.grpc_target, token) {
+        Ok(c) => c,
+        Err(e) => {
+            warn!("Failed to build catalog gRPC channel: {e}");
+            return Vec::new();
+        }
+    };
+    let mut client = catalog_client(channel);
+
     async fn fetch_page(
-        http: &Client,
-        headers: &Option<reqwest::header::HeaderMap>,
-        server_api: &str,
+        client: &mut CatalogServiceClient<AuthChannel>,
         page_size: u64,
         role: Option<&str>,
     ) -> Vec<Value> {
-        let mut page = 1u64;
+        let mut page = 1i32;
         let mut result = Vec::new();
         loop {
-            let mut url = format!("{server_api}/internal/servers?page={page}&limit={page_size}");
-            if let Some(r) = role {
-                url.push_str(&format!("&role={r}"));
-            }
-            let mut req = http.get(&url);
-            if let Some(h) = headers {
-                req = req.headers(h.clone());
-            }
-            let resp = match req.send().await {
-                Ok(r) => r,
+            let request = ListServersRequest {
+                page,
+                limit: page_size as i32,
+                role: role.map(|r| r.to_string()),
+                parent_id: None,
+            };
+            let resp = match client.list_servers(request).await {
+                Ok(r) => r.into_inner(),
                 Err(e) => {
                     warn!("Failed to fetch servers (page {page}, role={role:?}): {e}");
                     break;
                 }
             };
-            if !resp.status().is_success() {
-                warn!(
-                    "Failed to fetch servers (page {page}, role={role:?}): HTTP {}",
-                    resp.status()
-                );
-                break;
-            }
-            let data: ServerListResponse = match resp.json().await {
-                Ok(d) => d,
-                Err(e) => {
-                    warn!("Failed to parse server list response: {e}");
-                    break;
-                }
-            };
-            let total = data.total;
-            result.extend(data.items);
+            let total = resp.total;
+            result.extend(resp.items.iter().map(catalog_item_to_value));
             page += 1;
-            if result.len() as u64 >= total {
+            if result.len() as i32 >= total {
                 break;
             }
         }
         result
     }
 
-    let mut servers = fetch_page(http, headers, server_api, page_size, None).await;
-    let subs = fetch_page(http, headers, server_api, page_size, Some("subserver")).await;
+    let mut servers = fetch_page(&mut client, page_size, None).await;
+    let subs = fetch_page(&mut client, page_size, Some("subserver")).await;
     servers.extend(subs);
     servers
 }
 
-/// Fetch one server by ID from server-service.
-pub async fn fetch_server_by_id(
-    http: &Client,
-    headers: &Option<reqwest::header::HeaderMap>,
-    server_id: &str,
-    server_api: &str,
-    timeout_seconds: f64,
-) -> Option<Value> {
+/// Fetch one server by ID from server-service via the catalog gRPC service.
+pub async fn fetch_server_by_id(server: &ServerApiSettings, server_id: &str) -> Option<Value> {
     let id = server_id.trim();
     if id.is_empty() {
         return None;
     }
-    let url = format!("{server_api}/internal/servers/{id}");
-    let timeout = std::time::Duration::from_secs_f64(timeout_seconds);
-    let mut req = http.get(&url).timeout(timeout);
-    if let Some(h) = headers {
-        req = req.headers(h.clone());
-    }
-    match req.send().await {
-        Ok(resp) => {
-            if resp.status().as_u16() == 404 {
-                return None;
-            }
-            if !resp.status().is_success() {
-                return None;
-            }
-            resp.json::<Value>().await.ok()
-        }
+    let numeric_id: i64 = id.parse().ok()?;
+    let token = server.api_token.as_deref().unwrap_or_default();
+    let channel = auth_channel(&server.grpc_target, token).ok()?;
+    let mut client = catalog_client(channel);
+    match client.get_server(GetServerRequest { server_id: numeric_id }).await {
+        Ok(resp) => Some(catalog_item_to_value(&resp.into_inner())),
+        Err(status) if status.code() == tonic::Code::NotFound => None,
         Err(_) => None,
     }
 }
 
 /// Refresh the server catalog once, updating states map.
 pub async fn refresh_servers_once(
-    http: &Client,
-    headers: &Option<reqwest::header::HeaderMap>,
     states: &Arc<Mutex<HashMap<String, ServerState>>>,
     scheduler: &SchedulerHandle,
     settings: &Settings,
 ) -> bool {
     let started = Instant::now();
 
-    let servers = fetch_servers(
-        http,
-        headers,
-        &settings.server.api,
-        settings.collector.page_size,
-    )
-    .await;
+    let servers = fetch_servers(&settings.server, settings.collector.page_size).await;
     if servers.is_empty() {
         SERVER_LIST_REFRESH_FAILURE.inc();
         SERVER_LIST_REFRESH_DURATION.set(started.elapsed().as_secs_f64());
@@ -251,14 +219,12 @@ pub async fn refresh_servers_once(
 
 /// Periodically refresh the server catalog.
 pub async fn refresh_servers_loop(
-    http: Client,
-    headers: Option<reqwest::header::HeaderMap>,
     states: Arc<Mutex<HashMap<String, ServerState>>>,
     scheduler: SchedulerHandle,
     settings: Arc<Settings>,
 ) {
     loop {
-        let success = refresh_servers_once(&http, &headers, &states, &scheduler, &settings).await;
+        let success = refresh_servers_once(&states, &scheduler, &settings).await;
         let delay = if success {
             settings.collector.server_list_refresh_seconds
         } else {
@@ -378,8 +344,6 @@ pub fn parse_trigger_content(content: &str) -> Option<Vec<String>> {
 
 /// Listen to Redis BLPOP for force-ping requests.
 pub async fn redis_force_ping_loop(
-    http: Client,
-    headers: Option<reqwest::header::HeaderMap>,
     redis_url: String,
     states: Arc<Mutex<HashMap<String, ServerState>>>,
     scheduler: SchedulerHandle,
@@ -431,14 +395,8 @@ pub async fn redis_force_ping_loop(
                 } else {
                     // Fetch from server-service.
                     drop(map);
-                    if let Some(server) = fetch_server_by_id(
-                        &http,
-                        &headers,
-                        &target,
-                        &settings.server.api,
-                        settings.collector.http_timeout_seconds,
-                    )
-                    .await
+                    if let Some(server) =
+                        fetch_server_by_id(&settings.server, &target).await
                     {
                         let state = build_state(
                             server,

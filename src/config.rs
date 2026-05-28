@@ -5,14 +5,17 @@ use std::env;
 /// Server catalog API settings (server-service).
 #[derive(Debug, Clone)]
 pub struct ServerApiSettings {
-    pub api: String,
+    /// gRPC endpoint for CatalogService / InternalServersService
+    /// (e.g. `http://10.200.0.101:50051`).
+    pub grpc_target: String,
     pub api_token: Option<String>,
 }
 
 /// Monitoring-service API settings.
 #[derive(Debug, Clone)]
 pub struct MonitoringApiSettings {
-    pub api: String,
+    /// gRPC endpoint for MonitoringInternalService.
+    pub grpc_target: String,
     pub api_token: Option<String>,
 }
 
@@ -167,10 +170,7 @@ impl Settings {
             online_interval
         };
 
-        // Server API: try SERVER_ prefix first, fall back to CORE_ for compat.
-        let server_api = env_str_opt("SERVER_API")
-            .or_else(|| env_str_opt("CORE_API"))
-            .unwrap_or_else(|| "http://server-service:8201".to_string());
+        // Internal token: try SERVER_ prefix first, fall back to CORE_ for compat.
         let server_api_token =
             env_str_opt("SERVER_API_TOKEN").or_else(|| env_str_opt("CORE_API_TOKEN"));
 
@@ -179,12 +179,15 @@ impl Settings {
             log_level: env_str("LOG_LEVEL", "info"),
 
             server: ServerApiSettings {
-                api: server_api,
+                grpc_target: env_str("SERVER_GRPC_TARGET", "http://server-service:50201"),
                 api_token: server_api_token,
             },
 
             monitoring: MonitoringApiSettings {
-                api: env_str("MONITORING_API", "http://monitoring-service:8200"),
+                grpc_target: env_str(
+                    "MONITORING_GRPC_TARGET",
+                    "http://monitoring-service:50200",
+                ),
                 api_token: env_str_opt("MONITORING_API_TOKEN"),
             },
 

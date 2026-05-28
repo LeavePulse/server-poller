@@ -3,6 +3,7 @@ mod change_detection;
 mod collector;
 mod config;
 mod geo;
+mod grpc_clients;
 mod metrics;
 mod models;
 mod ping;
