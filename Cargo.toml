@@ -31,6 +31,12 @@ tokio-util = "0.7"
 thiserror = "2"
 hickory-resolver = { version = "0.24", features = ["tokio-runtime", "system-config"] }
 
+[dev-dependencies]
+# Installs the git pre-commit/pre-push hooks from .cargo-husky/hooks on first
+# `cargo test`. The hooks invoke the shared `lp-ci` gate, which is installed
+# separately via `cargo install` (cargo can't `run -p` a git dependency).
+cargo-husky = { version = "1", default-features = false, features = ["user-hooks"] }
+
 [profile.release]
 lto = true
 codegen-units = 1

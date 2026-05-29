@@ -13,9 +13,9 @@ use tracing::{info, warn};
 use crate::change_detection::build_change_payload;
 use crate::config::{MonitoringApiSettings, Settings};
 use crate::geo::GeoCache;
-use crate::grpc_clients::{auth_channel, monitoring_client, value_to_ingest_point};
-use crate::grpc_clients::monitoring::v1::IngestUnverifiedRequest;
 use crate::grpc_clients::monitoring::v1::IngestPoint;
+use crate::grpc_clients::monitoring::v1::IngestUnverifiedRequest;
+use crate::grpc_clients::{auth_channel, monitoring_client, value_to_ingest_point};
 use crate::metrics::*;
 use crate::models::{ServerState, is_internal_only_host};
 use crate::ping::{maybe_probe_bedrock, maybe_update_favicon, poll_server};
@@ -268,14 +268,7 @@ pub async fn run(settings: Settings) {
                 };
                 // Process this key inline (reuse worker_loop logic).
                 process_work_item(
-                    id,
-                    &http,
-                    &states,
-                    &scheduler,
-                    &geo_cache,
-                    &settings,
-                    &result_tx,
-                    key,
+                    id, &http, &states, &scheduler, &geo_cache, &settings, &result_tx, key,
                 )
                 .await;
             }

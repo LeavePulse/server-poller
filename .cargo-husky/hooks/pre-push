@@ -1,0 +1,14 @@
+#!/usr/bin/env sh
+# Managed by cargo-husky — installed into .git/hooks on `cargo test`.
+# Heavier gate (test + build) via the shared Rust lp-ci engine; format/clippy
+# already ran on pre-commit.
+set -e
+
+if ! command -v lp-ci >/dev/null 2>&1; then
+    echo "lp-ci not found; installing the shared gate from service-toolkit…"
+    cargo install --git https://github.com/LeavePulse/service-toolkit.git \
+        --branch main service-toolkit-rust \
+        --no-default-features --features cli --bin lp-ci
+fi
+
+exec lp-ci --no-fmt --no-clippy --no-audit --no-machete

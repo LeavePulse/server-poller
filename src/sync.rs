@@ -13,18 +13,17 @@ use tracing::{debug, info, warn};
 
 use crate::config::{ServerApiSettings, Settings};
 use crate::geo::GeoCache;
+use crate::grpc_clients::server::v1::GetServerRequest;
 use crate::grpc_clients::server::v1::ListServersRequest;
 use crate::grpc_clients::server::v1::catalog_service_client::CatalogServiceClient;
-use crate::grpc_clients::server::v1::GetServerRequest;
 use crate::grpc_clients::{AuthChannel, auth_channel, catalog_client, catalog_item_to_value};
 use crate::metrics::{
     SERVER_LIST_REFRESH_DURATION, SERVER_LIST_REFRESH_FAILURE, SERVER_LIST_REFRESH_SUCCESS,
     SERVERS_TOTAL,
 };
 use crate::models::{
-    Edition, ServerState, build_state, is_plugin_fallback_mode,
-    is_plugin_managed, normalize_edition, parse_address, resolve_state_ports, seed_bedrock_probe,
-    wants_bedrock_probe,
+    Edition, ServerState, build_state, is_plugin_fallback_mode, is_plugin_managed,
+    normalize_edition, parse_address, resolve_state_ports, seed_bedrock_probe, wants_bedrock_probe,
 };
 use crate::ping::poll_server;
 use crate::scheduler::SchedulerHandle;
@@ -88,7 +87,12 @@ pub async fn fetch_server_by_id(server: &ServerApiSettings, server_id: &str) -> 
     let token = server.api_token.as_deref().unwrap_or_default();
     let channel = auth_channel(&server.grpc_target, token).ok()?;
     let mut client = catalog_client(channel);
-    match client.get_server(GetServerRequest { server_id: numeric_id }).await {
+    match client
+        .get_server(GetServerRequest {
+            server_id: numeric_id,
+        })
+        .await
+    {
         Ok(resp) => Some(catalog_item_to_value(&resp.into_inner())),
         Err(status) if status.code() == tonic::Code::NotFound => None,
         Err(_) => None,
@@ -395,9 +399,7 @@ pub async fn redis_force_ping_loop(
                 } else {
                     // Fetch from server-service.
                     drop(map);
-                    if let Some(server) =
-                        fetch_server_by_id(&settings.server, &target).await
-                    {
+                    if let Some(server) = fetch_server_by_id(&settings.server, &target).await {
                         let state = build_state(
                             server,
                             now,
@@ -436,7 +438,11 @@ pub async fn redis_discovery_probe_loop(
     geo_cache: Arc<GeoCache>,
     settings: Arc<Settings>,
 ) {
-    let queue_key = settings.collector.discovery_probe_queue_key.trim().to_string();
+    let queue_key = settings
+        .collector
+        .discovery_probe_queue_key
+        .trim()
+        .to_string();
     if queue_key.is_empty() {
         return;
     }
@@ -469,10 +475,7 @@ pub async fn redis_discovery_probe_loop(
         }
     };
 
-    let pop_timeout = settings
-        .collector
-        .force_ping_pop_timeout_seconds
-        .max(0.5) as usize;
+    let pop_timeout = settings.collector.force_ping_pop_timeout_seconds.max(0.5) as usize;
 
     loop {
         let popped: Result<Option<(String, String)>, _> = redis::cmd("BLPOP")
@@ -583,9 +586,7 @@ pub async fn redis_discovery_probe_loop(
                         );
                     }
                     Err(e) => {
-                        warn!(
-                            "Discovery probe: failed to write result for {candidate_id}: {e}"
-                        );
+                        warn!("Discovery probe: failed to write result for {candidate_id}: {e}");
                     }
                 }
             }

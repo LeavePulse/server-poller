@@ -184,10 +184,7 @@ impl Settings {
             },
 
             monitoring: MonitoringApiSettings {
-                grpc_target: env_str(
-                    "MONITORING_GRPC_TARGET",
-                    "http://monitoring-service:50200",
-                ),
+                grpc_target: env_str("MONITORING_GRPC_TARGET", "http://monitoring-service:50200"),
                 api_token: env_str_opt("MONITORING_API_TOKEN"),
             },
 
