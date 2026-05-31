@@ -25,4 +25,6 @@ permissions:
 jobs:
   build:
     uses: LeavePulse/service-toolkit/.github/workflows/reusable-build-ghcr.yml@main
+    with:
+      runs_on: '["ubuntu-latest"]'
     secrets: inherit
