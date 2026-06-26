@@ -12,17 +12,13 @@ tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", features = ["json"] }
 tonic = "0.12"
 prost = "0.13"
-service-toolkit-rust = { git = "https://github.com/LeavePulse/service-toolkit.git", default-features = false, features = ["grpc"] }
+service-toolkit-rust = { git = "https://github.com/LeavePulse/service-toolkit.git", default-features = false, features = ["grpc", "runtime"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 redis = { version = "0.27", features = ["tokio-comp"] }
 prometheus = { version = "0.13", features = ["process"] }
-hyper = { version = "1", features = ["server", "http1"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
-http-body-util = "0.1"
 sha2 = "0.10"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 dotenvy = "0.15"
 rand = "0.8"
 chrono = { version = "0.4", features = ["serde"] }

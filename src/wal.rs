@@ -9,9 +9,9 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
+use service_toolkit_rust::time::now_millis_u128;
 use tracing::{info, warn};
 
 use crate::metrics::{
@@ -162,10 +162,7 @@ impl WalBuffer {
         // Close current segment (drop flushes).
         self.current_segment = None;
 
-        let ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis();
+        let ts = now_millis_u128();
         let path = self.dir.join(format!("buffer-{ts}.wal"));
 
         let file = OpenOptions::new().create(true).append(true).open(&path)?;

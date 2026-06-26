@@ -1,20 +1,16 @@
-//! Prometheus metrics definitions and HTTP exporter.
+//! Prometheus metrics definitions. The `/metrics` HTTP exporter itself is
+//! served by the shared `service_toolkit_rust::metrics` helper over the
+//! process-global default registry these `register_*!` macros write to.
 
 use std::net::SocketAddr;
 use std::sync::LazyLock;
 
-use http_body_util::Full;
-use hyper::body::Bytes;
-use hyper::service::service_fn;
-use hyper::{Request, Response, StatusCode};
-use hyper_util::rt::TokioIo;
 use prometheus::{
-    Encoder, Gauge, GaugeVec, Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, Opts,
-    TextEncoder, register_gauge, register_gauge_vec, register_histogram, register_int_counter,
+    Gauge, GaugeVec, Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, Opts,
+    register_gauge, register_gauge_vec, register_histogram, register_int_counter,
     register_int_counter_vec, register_int_gauge,
 };
-use tokio::net::TcpListener;
-use tracing::{error, info};
+use tracing::info;
 
 // ---------------------------------------------------------------------------
 // Polling
@@ -280,59 +276,12 @@ pub fn init() {
     LazyLock::force(&BUFFER_EVICTED);
 }
 
-async fn handle_metrics(
-    _req: Request<hyper::body::Incoming>,
-) -> Result<Response<Full<Bytes>>, hyper::Error> {
-    let encoder = TextEncoder::new();
-    let metric_families = prometheus::gather();
-    let mut buffer = Vec::new();
-    if encoder.encode(&metric_families, &mut buffer).is_err() {
-        let resp = Response::builder()
-            .status(StatusCode::INTERNAL_SERVER_ERROR)
-            .body(Full::new(Bytes::from("Failed to encode metrics")))
-            .unwrap();
-        return Ok(resp);
-    }
-    let resp = Response::builder()
-        .status(StatusCode::OK)
-        .header("Content-Type", encoder.format_type())
-        .body(Full::new(Bytes::from(buffer)))
-        .unwrap();
-    Ok(resp)
-}
-
-/// Start the Prometheus metrics HTTP server on the given address.
+/// Start the Prometheus metrics HTTP server on the given address. Serves the
+/// process-global default registry via the shared toolkit helper.
 pub async fn start_metrics_server(host: &str, port: u16) {
     let addr: SocketAddr = format!("{host}:{port}")
         .parse()
         .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], port)));
-
-    let listener = match TcpListener::bind(addr).await {
-        Ok(l) => l,
-        Err(e) => {
-            error!("Failed to bind metrics server on {addr}: {e}");
-            return;
-        }
-    };
-
     info!("Prometheus metrics server listening on {addr}");
-
-    loop {
-        let (stream, _) = match listener.accept().await {
-            Ok(v) => v,
-            Err(e) => {
-                error!("Metrics server accept error: {e}");
-                continue;
-            }
-        };
-        let io = TokioIo::new(stream);
-        tokio::spawn(async move {
-            if let Err(e) = hyper::server::conn::http1::Builder::new()
-                .serve_connection(io, service_fn(handle_metrics))
-                .await
-            {
-                error!("Metrics connection error: {e}");
-            }
-        });
-    }
+    service_toolkit_rust::metrics::serve(addr).await;
 }

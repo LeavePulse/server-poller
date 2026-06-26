@@ -13,18 +13,12 @@ mod wal;
 
 use config::Settings;
 use tracing::info;
-use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() {
     let settings = Settings::load();
 
-    // Initialize tracing.
-    let filter = EnvFilter::try_new(&settings.log_level).unwrap_or_else(|_| EnvFilter::new("info"));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(true)
-        .init();
+    service_toolkit_rust::telemetry::init_tracing(&settings.log_level);
 
     info!(
         service = %settings.service_name,

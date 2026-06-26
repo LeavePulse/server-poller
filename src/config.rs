@@ -1,6 +1,10 @@
 //! Application configuration loaded from environment variables + .env file.
+//!
+//! The typed env readers below are thin aliases over
+//! `service_toolkit_rust::env` so the parsing logic lives in one place; the
+//! local names are kept for the many fallback-chain call sites in `load`.
 
-use std::env;
+use service_toolkit_rust::env as cfg;
 
 /// Server catalog API settings (server-service).
 #[derive(Debug, Clone)]
@@ -96,47 +100,34 @@ pub struct Settings {
     pub redis: RedisSettings,
 }
 
+// Thin aliases over the shared toolkit readers — kept so the fallback-chain
+// call sites in `load` (`.max(...)`, `or_else`) stay terse.
 fn env_str(key: &str, default: &str) -> String {
-    env::var(key).unwrap_or_else(|_| default.to_string())
+    cfg::str(key, default)
 }
 
 fn env_str_opt(key: &str) -> Option<String> {
-    env::var(key).ok().filter(|s| !s.is_empty())
+    cfg::str_opt(key)
 }
 
 fn env_u64(key: &str, default: u64) -> u64 {
-    env::var(key)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
+    cfg::u64(key, default)
 }
 
 fn env_usize(key: &str, default: usize) -> usize {
-    env::var(key)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
+    cfg::usize(key, default)
 }
 
 fn env_f64(key: &str, default: f64) -> f64 {
-    env::var(key)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
+    cfg::f64(key, default)
 }
 
 fn env_u16(key: &str, default: u16) -> u16 {
-    env::var(key)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
+    cfg::u16(key, default)
 }
 
 fn env_bool(key: &str, default: bool) -> bool {
-    env::var(key)
-        .ok()
-        .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1" | "yes" | "on"))
-        .unwrap_or(default)
+    cfg::bool(key, default)
 }
 
 impl Settings {
