@@ -1039,9 +1039,12 @@ mod tests {
 
     #[tokio::test]
     async fn java_connect_target_resolves_srv_port() {
+        // Live SRV lookup: assert only that the SRV path resolved to a NON-default
+        // port, not a hardcoded value — the record's port is the domain owner's to
+        // change (it has), and pinning it makes this test flap on their DNS.
         let target =
             resolve_java_connect_target("wizard.harmoniya.net", None, Duration::from_secs(5)).await;
         assert_eq!(target.connect_host, "wizard.harmoniya.net");
-        assert_eq!(target.connect_port, 20007);
+        assert_ne!(target.connect_port, 25565);
     }
 }
