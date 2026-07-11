@@ -18,6 +18,3 @@ services:
 networks:
   shared:
     driver: bridge
-    ipam:
-      config:
-        - subnet: 10.201.0.0/25
