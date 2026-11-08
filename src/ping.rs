@@ -6,6 +6,14 @@ use std::net::{IpAddr, SocketAddr, TcpStream as StdTcpStream};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// The edition a server answering both Java and Bedrock is recorded as.
+///
+/// server-service calls it `hybrid` since its migration 0034 (June 2026,
+/// `46ba834`) and rejects anything else. This sent `java_bedrock`, the old
+/// name, so every server found to answer Bedrock too was refused with
+/// "Invalid game edition." on every probe and never marked.
+const HYBRID_EDITION: &str = "hybrid";
+
 use chrono::Utc;
 use hickory_resolver::TokioAsyncResolver;
 use reqwest::Client;
@@ -811,17 +819,20 @@ pub async fn maybe_probe_bedrock(state: &mut ServerState, settings: &Settings) {
                     let mut client = internal_servers_client(channel);
                     let request = UpdateServerEditionRequest {
                         server_id,
-                        game_edition: "java_bedrock".to_string(),
+                        game_edition: HYBRID_EDITION.to_string(),
                     };
                     match client.update_server_edition(request).await {
                         Ok(_) => {
                             if let Some(obj) = state.server.as_object_mut() {
                                 obj.insert(
                                     "game_edition".to_string(),
-                                    Value::String("java_bedrock".to_string()),
+                                    Value::String(HYBRID_EDITION.to_string()),
                                 );
                             }
-                            info!("Updated server {} edition to java_bedrock", state.server_id);
+                            info!(
+                                "Updated server {} edition to {HYBRID_EDITION}",
+                                state.server_id
+                            );
                         }
                         Err(status) => {
                             warn!("Failed to update edition for {}: {status}", state.server_id);

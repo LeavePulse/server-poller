@@ -352,6 +352,8 @@ mod tests {
         assert_eq!(normalize_edition(Some("bedrock")), Edition::Bedrock);
         assert_eq!(normalize_edition(Some("Bedrock")), Edition::Bedrock);
         assert_eq!(normalize_edition(Some("java_bedrock")), Edition::Java);
+        // A hybrid server is polled over Java SLP; Bedrock is probed separately.
+        assert_eq!(normalize_edition(Some("hybrid")), Edition::Java);
     }
 
     #[test]

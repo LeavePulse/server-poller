@@ -18,7 +18,7 @@ service InternalServersService {
 
 message UpdateServerEditionRequest {
   int64 server_id = 1;
-  // One of: "java", "bedrock", "java_bedrock".
+  // One of: "java", "bedrock", "hybrid" (server-service migration 0034).
   string game_edition = 2;
 }
 

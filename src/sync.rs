@@ -346,6 +346,40 @@ pub fn parse_trigger_content(content: &str) -> Option<Vec<String>> {
     Some(ids)
 }
 
+/// First retry delay of [`connect_until_up`].
+const REDIS_RETRY_FIRST: std::time::Duration = std::time::Duration::from_secs(1);
+/// Ceiling of [`connect_until_up`]'s doubling delay.
+const REDIS_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Connect to Redis, retrying with a doubling delay until it answers.
+///
+/// Both Redis loops used to connect once and `return` on failure, so a
+/// Redis that was unreachable for the first two minutes after a restart
+/// disabled force-pings and discovery probes until the NEXT restart, with one
+/// warning in the log as the only trace. On 2026-11-08 that was the whole
+/// state of app-vps-1's poller for its first run after the egress repair.
+async fn connect_until_up(client: &redis::Client, what: &str) -> redis::aio::MultiplexedConnection {
+    let mut delay = REDIS_RETRY_FIRST;
+    loop {
+        match client.get_multiplexed_async_connection().await {
+            Ok(conn) => {
+                info!("Redis {what} connected");
+                return conn;
+            }
+            Err(e) => {
+                warn!("Redis {what} connection failed, retrying in {delay:?}: {e}");
+                tokio::time::sleep(delay).await;
+                delay = next_redis_delay(delay);
+            }
+        }
+    }
+}
+
+/// The delay after *delay*: doubled, never above [`REDIS_RETRY_MAX`].
+fn next_redis_delay(delay: std::time::Duration) -> std::time::Duration {
+    (delay * 2).min(REDIS_RETRY_MAX)
+}
+
 /// Listen to Redis BLPOP for force-ping requests.
 pub async fn redis_force_ping_loop(
     redis_url: String,
@@ -366,13 +400,7 @@ pub async fn redis_force_ping_loop(
         }
     };
 
-    let mut conn = match client.get_multiplexed_async_connection().await {
-        Ok(c) => c,
-        Err(e) => {
-            warn!("Redis force-ping connection failed: {e}");
-            return;
-        }
-    };
+    let mut conn = connect_until_up(&client, "force-ping").await;
 
     let timeout_secs = settings.collector.force_ping_pop_timeout_seconds.max(0.5) as usize;
 
@@ -467,13 +495,7 @@ pub async fn redis_discovery_probe_loop(
         }
     };
 
-    let mut conn = match client.get_multiplexed_async_connection().await {
-        Ok(c) => c,
-        Err(e) => {
-            warn!("Redis discovery probe connection failed: {e}");
-            return;
-        }
-    };
+    let mut conn = connect_until_up(&client, "discovery probe").await;
 
     let pop_timeout = settings.collector.force_ping_pop_timeout_seconds.max(0.5) as usize;
 
@@ -659,5 +681,21 @@ mod tests {
     fn test_json_numeric_ids() {
         let result = parse_trigger_content(r#"{"ids": [1, 2, 3]}"#).unwrap();
         assert_eq!(result, vec!["1", "2", "3"]);
+    }
+}
+
+#[cfg(test)]
+mod redis_retry_tests {
+    use super::*;
+
+    #[test]
+    fn the_retry_delay_doubles_up_to_its_ceiling() {
+        let mut delay = REDIS_RETRY_FIRST;
+        let mut seen = vec![delay.as_secs()];
+        for _ in 0..8 {
+            delay = next_redis_delay(delay);
+            seen.push(delay.as_secs());
+        }
+        assert_eq!(seen, vec![1, 2, 4, 8, 16, 32, 60, 60, 60]);
     }
 }
