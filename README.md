@@ -19,13 +19,15 @@
 
 - **Runtime:** `tokio` (multi-threaded executor)
 - **Networking:** `reqwest` (HTTP), `hickory-resolver` (Async DNS)
-- **Data & State:** `redis` (async-comp), `serde` / `serde_json`
+- **Internal RPC:** `tonic` gRPC clients for server-service and monitoring, generated from `proto/`
+- **Data & State:** `redis` (tokio-comp), `serde` / `serde_json`
 - **Observability:** `prometheus`, `tracing` (structured logging)
 - **Security & Integrity:** `sha2` (payload hashing for change detection)
 
 ## 🧩 Key Components
 
 - **`ping.rs`**: The heart of the service. Manages connection lifecycles and handles protocol-specific handshake logic.
+- **`bedrock.rs`**: RakNet Unconnected Ping/Pong for Bedrock servers.
 - **`collector.rs`**: Orchestrates high-concurrency workers with configurable rate-limiting and backoff strategies.
 - **`change_detection.rs`**: Compares incoming snapshots with the last known state to trigger events only when data actually changes.
 - **`metrics.rs`**: Exports real-time telemetry for monitoring worker performance and probe health.
